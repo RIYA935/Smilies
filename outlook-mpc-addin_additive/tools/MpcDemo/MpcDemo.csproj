@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Shows the secret sharing end to end without Outlook, on any OS:
+      dotnet run (project tools/MpcDemo)
+    It writes the original email, each server's email-share and the rebuilt email as .eml files.
+    The core sources are compiled in directly, exactly as the add-in and the tests do.
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <!-- Run on .NET 8 or any newer runtime that is installed. -->
+    <RollForward>Major</RollForward>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <RootNamespace>Mpc.Demo</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\src\Mpc.Core\**\*.cs" Exclude="..\..\src\Mpc.Core\obj\**;..\..\src\Mpc.Core\bin\**">
+      <Link>Core\%(RecursiveDir)%(Filename)%(Extension)</Link>
+    </Compile>
+  </ItemGroup>
+
+</Project>
