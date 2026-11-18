@@ -84,6 +84,8 @@ namespace MpcOutlookAddIn
 
         public void OnToggle(Office.IRibbonControl control, bool pressed)
         {
+            Globals.ThisAddIn.ReloadSettings(); // pick up any Notepad edits first
+
             switch (control.Id)
             {
                 case "MpcAutoSplitToggle":
@@ -103,7 +105,7 @@ namespace MpcOutlookAddIn
         {
             try
             {
-                Globals.ThisAddIn.SaveSettings(); // make sure the file exists
+                if (!File.Exists(ThisAddIn.SettingsPath)) Globals.ThisAddIn.SaveSettings(); // create it the first time only
                 Process.Start("notepad.exe", "\"" + ThisAddIn.SettingsPath + "\"");
             }
             catch (Exception ex)

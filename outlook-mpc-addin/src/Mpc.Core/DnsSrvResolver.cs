@@ -5,6 +5,8 @@ using System.Linq;
 using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
+using System.Runtime.ExceptionServices;
+using System.Threading.Tasks;
 
 namespace Mpc.Core
 {
@@ -198,7 +200,22 @@ namespace Mpc.Core
             {
                 tcp.ReceiveTimeout = _timeoutMs;
                 tcp.SendTimeout = _timeoutMs;
-                if (!tcp.ConnectAsync(server.Address, server.Port).Wait(_timeoutMs))
+                Task connect = tcp.ConnectAsync(server.Address, server.Port);
+                bool connected;
+                try
+                {
+                    connected = connect.Wait(_timeoutMs);
+                }
+                catch (AggregateException ex)
+                {
+                    // Wait() wraps a failed connect (e.g. connection refused) in an AggregateException,
+                    // which Resolve does not catch. Rethrow the real error (usually a SocketException)
+                    // with its original stack trace so Resolve can move on to the next server.
+                    ExceptionDispatchInfo.Capture(ex.GetBaseException()).Throw();
+                    throw; // not reached; keeps the compiler happy
+                }
+
+                if (!connected)
                 {
                     throw new TimeoutException("Timed out connecting to DNS server " + server + " over TCP.");
                 }

@@ -63,6 +63,13 @@ namespace Mpc.Core
         /// </summary>
         public static string SetValue(string raw, string name, string value)
         {
+            // NEW: block header injection
+            if (value != null && (value.IndexOf('\r') >= 0 || value.IndexOf('\n') >= 0))
+                throw new ArgumentException("Header value must not contain line breaks.", "value");
+            
+            if (string.IsNullOrEmpty(name) || name.IndexOfAny(new[] { '\r', '\n', ':' }) >= 0)
+                throw new ArgumentException("Invalid header name.", "name");
+            
             string newline = (raw != null && raw.IndexOf("\r\n", StringComparison.Ordinal) >= 0) ? "\r\n" : "\n";
             string newField = name + ": " + value;
 

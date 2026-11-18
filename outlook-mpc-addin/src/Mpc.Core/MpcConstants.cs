@@ -23,6 +23,18 @@ namespace Mpc.Core
         /// <summary>Value the sender puts in X-MPC-Result (mailutils sends a single space).</summary>
         public const string BlankResultValue = " ";
 
+        /// <summary>
+        /// X-MPC-Scheme: how the message was split. Absent on messages from mailutils, whose
+        /// chunks are plain slices of the body text.
+        /// </summary>
+        public const string HeaderScheme = "X-MPC-Scheme";
+
+        /// <summary>
+        /// X-MPC-Scheme value for additive secret sharing over Z_p, p = 2^61 - 1: each message
+        /// carries one share of the body and of every attachment as .bin files.
+        /// </summary>
+        public const string SchemeAdditiveP61 = "additive-p61";
+
         /// <summary>MAX_MPC_SERVERS in mpc.h: the most SRV records (and so chunks) used.</summary>
         public const int MaxMpcServers = 2;
 

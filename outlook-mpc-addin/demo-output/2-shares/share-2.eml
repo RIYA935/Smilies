@@ -1,0 +1,67 @@
+From: Alice <alice@sender.example>
+To: Bob <bob@example.com>
+Subject: Launch plan
+Date: Sat, 14 Nov 2026 09:33:57 GMT
+Message-ID: <a943eca988104c198a43ee015a1d8b60@mpc-demo>
+X-MPC-Via: relay2.example.net
+X-MPC-ID: 4F793244-7751-4FEB-839D-A69D9C57CCC5
+X-MPC-Chunk: [002/002]
+X-MPC-Result:  
+X-MPC-Scheme: additive-p61
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="=_mpc_51618a0d19b14c1996bea6c5332811e8"
+
+This is a multi-part message in MIME format.
+--=_mpc_51618a0d19b14c1996bea6c5332811e8
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: base64
+
+VGhpcyBpcyBzaGFyZSAyIG9mIDIgb2YgYSBtZXNzYWdlIHNlbnQgd2l0aCBNUEMgc2VjcmV0IHNo
+YXJpbmcuDQpUaGUgdGV4dCBhbmQgYXR0YWNobWVudHMgYXJlIGluIHRoZSBhdHRhY2hlZCAuYmlu
+IGZpbGVzLCB3aGljaCBjYW4gb25seSBiZSByZWFkDQpvbmNlIGFsbCAyIHNoYXJlcyBhcmUgY29t
+YmluZWQgYnkgdGhlIE1QQyBhZGQtaW4uDQo=
+--=_mpc_51618a0d19b14c1996bea6c5332811e8
+Content-Type: application/octet-stream
+Content-Disposition: attachment; filename="smilies-body.bin"
+Content-Transfer-Encoding: base64
+
+U01MUwEBAQAAAKIAAAAAAAAAyCu6DKRJOQ+RhrTtHAyxFvCTirsGfukAF5lEmenVVhLNZLx9ILFp
+ASy4wJTKIXER52+UYuqVLxiLFEdP/1+HFg444dLpOC0UjD0fKYDyphJg/DwXpE8hGC2uM5HLmBAH
+GU0hGh2MGRy+N/9kHKdBCqs8setKNLcEmdzR/+0nOAWt5Al3hH7XDZBINAmAoqQFsh9FRc7BDBA8
+2s9gPS5FCsnocb0w0zMOfpGBJGlYiRYvlm+r/bJ+B/ZWwTrs23wS
+--=_mpc_51618a0d19b14c1996bea6c5332811e8
+Content-Type: application/octet-stream
+Content-Disposition: attachment; filename="smilies-att-1.bin"
+Content-Transfer-Encoding: base64
+
+U01MUwECAQABAFgAAAAAAAAAet9nZspgchvlv/ObQkI4DPIMleAfzfkV6t9fXMgMqxnWgV425oMW
+C77CcE3f85wZzSsIvxWAMxS2QwaLsaZ9A2Sy88HtCigEbWkIXNyGSgXn3BI+lTiVGOaMXLREH28X
+bhGTqf0W2gs=
+--=_mpc_51618a0d19b14c1996bea6c5332811e8
+Content-Type: application/octet-stream
+Content-Disposition: attachment; filename="smilies-att-2.bin"
+Content-Transfer-Encoding: base64
+
+U01MUwECAQACAHQAAAAAAAAAg7gMx+L4txpf3dYd67W4Ap/EaJYG+KQXBli0ZljW8gumIy9i1Heg
+GDEZT4P/uIUP4F1Iby+EIhSNOaniLwxEDPhfBy3UpVAdOfGekMdJJBvDs8qIjxB9FwcCk4VSU8we
+Kuvj662FZQE7NzZ+sGPcHnmzVnMclrwTzRJX7ceq3h1drOcc3A+ZBg==
+--=_mpc_51618a0d19b14c1996bea6c5332811e8
+Content-Type: application/octet-stream
+Content-Disposition: attachment; filename="smilies-att-3.bin"
+Content-Transfer-Encoding: base64
+
+U01MUwECAQADAIgCAAAAAAAAZBVOZGoslQAo4e0Av+BoHgpPvn0hIeUHlfCK/vBQFBhOhicTjT8k
+BFsdn7kDOKcVPN3725VYawoF4NEuOVORHsU5ewpYFpYbDwRKxKRWRh7Q7UG+3mPiGWxIGJEWgPMc
+ZLCc9nFjYhuiHZDB42wUADDs+xk/6YMBi22/fShjOQhHlJGXu4UuAQ1beu5Qw/wETHk1N01nWggf
+Gw0eHMa6EhkoDiiPYqgJwUOF7pU5ORphtWcHQeU1FEvx9903uEYJ0BVO+q0m5xLFrxX/XFPdA6Os
+Hv714XAJ6jXMaa58xRwDTxWrE+xeDOe8g+joGrcaAEE39qO0vwEu+I8NYyNQBzON6W/pzZoMPKEx
+SL42Rg8kp6fQViIxEdxPPqllRekCqGLI+farlBOgZt1p4uHoC7nkBfY1fQIMp3dDdp0TXRtuSdgI
+RjxLHGPEwNycgEkJXEnZDGXwLgyHNSIv4ydmHhY02s/rTAMezsgruRVJpw2cyoDZ1dyTANqj6gke
+Ne4Rl1QP1AYtTAnfGf43R3khHhYP8o6N4gIcrLbRRqk1UxJpCM/eVCQiDN4NRza1sygDh/AfCn0u
+IRU4U356GjNpA+uA2c3cSL0fqNewVjboVA86TsgUicZdD0g9B2cuuv0KPKsAJiG4vhhoiQIAMSnF
+CwBraNvoQ1wJRTMZPezbMgviGYtogoymGclSCwfFK4cK/F0R6adEuB9Iv0qgqat9BAnjiP4Vkg4E
+8kPKm1KzMhV6ARkXY7GeEkx26CGhs+AGyC2I01rKxAdwx5DBtyKVCksLsAXBfkseRLMX00M1LRmR
+dnKDwdVuHLGkXrWRsyUbUmR/Ec0xyRzzPvwuNkVBHEnNrSoxzUoFatuG8HKF7w95pZ49AV39FhM9
+TISAf+UccphssZmv1xn03xv1sBpRHBkfBLRNyCEJ3hxeKiQq/gEQTWNvdxyWGWsPuhmx3bgI3eLR
+prCoHQy+f2QkhMM5Dc4q+xZrZlUG
+--=_mpc_51618a0d19b14c1996bea6c5332811e8--

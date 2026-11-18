@@ -98,6 +98,19 @@ namespace MpcOutlookAddIn
             }
         }
 
+        /// <summary>Re-reads settings.ini so edits made in Notepad aren't overwritten.</summary>
+        internal void ReloadSettings()
+        {
+            try
+            {
+                _settings = MpcSettings.Load(SettingsPath);
+            }
+            catch (Exception ex)
+            {
+                AddInLog.Write("Could not re-read " + SettingsPath + "; keeping the current settings", ex);
+            }
+        }
+
         internal void ScheduleInboxRejoin()
         {
             if (_rejoinTimer == null) return;

@@ -7,18 +7,22 @@ namespace Mpc.Core
     /// <summary>One received chunk, tied to whatever object holds the message (T).</summary>
     public sealed class ReceivedChunk<T>
     {
-        public ReceivedChunk(T item, string mpcId, ChunkValue chunk, string via)
+        public ReceivedChunk(T item, string mpcId, ChunkValue chunk, string via, string scheme = null)
         {
             Item = item;
             MpcId = mpcId;
             Chunk = chunk;
             Via = via ?? string.Empty;
+            Scheme = string.IsNullOrWhiteSpace(scheme) ? null : scheme.Trim();
         }
 
         public T Item { get; private set; }
         public string MpcId { get; private set; }
         public ChunkValue Chunk { get; private set; }
         public string Via { get; private set; }
+
+        /// <summary>X-MPC-Scheme, or null for a mailutils chunk (a plain slice of the body).</summary>
+        public string Scheme { get; private set; }
     }
 
     /// <summary>All the chunks that share one X-MPC-ID.</summary>
@@ -58,6 +62,31 @@ namespace Mpc.Core
             get { return string.Join(", ", Chunks.Select(c => c.Via)); }
         }
 
+        /// <summary>
+        /// The X-MPC-Scheme of the chunks (null for mailutils chunks). Only meaningful when
+        /// <see cref="HasOneScheme"/> is true.
+        /// </summary>
+        public string Scheme
+        {
+            get { return Chunks.Count == 0 ? null : Chunks[0].Scheme; }
+        }
+
+        /// <summary>True when every chunk was split the same way.</summary>
+        public bool HasOneScheme
+        {
+            get
+            {
+                string scheme = Scheme;
+                return Chunks.All(c => string.Equals(c.Scheme, scheme, StringComparison.OrdinalIgnoreCase));
+            }
+        }
+
+        /// <summary>True when the chunks are additive shares (see <see cref="SharedMessage"/>).</summary>
+        public bool IsAdditiveShares
+        {
+            get { return string.Equals(Scheme, MpcConstants.SchemeAdditiveP61, StringComparison.OrdinalIgnoreCase); }
+        }
+
         public IEnumerable<int> MissingChunkNumbers
         {
             get
@@ -90,7 +119,8 @@ namespace Mpc.Core
             string via = InternetHeaders.GetFirst(rawHeaders, MpcConstants.HeaderVia);
             if (via == null) return null;
 
-            return new ReceivedChunk<T>(item, id.Trim(), chunk, via);
+            string scheme = InternetHeaders.GetFirst(rawHeaders, MpcConstants.HeaderScheme);
+            return new ReceivedChunk<T>(item, id.Trim(), chunk, via, scheme);
         }
 
         /// <summary>
@@ -138,7 +168,10 @@ namespace Mpc.Core
             return groups;
         }
 
-        /// <summary>Joins chunk bodies in order (mu_stream_copy of each chunk onto the first).</summary>
+        /// <summary>
+        /// Joins mailutils chunk bodies in order (mu_stream_copy of each chunk onto the first).
+        /// Additive shares are combined with <see cref="SharedMessage.Combine"/> instead.
+        /// </summary>
         public static string MergeBodies(IEnumerable<string> bodiesInChunkOrder)
         {
             return string.Concat(bodiesInChunkOrder ?? Enumerable.Empty<string>());
