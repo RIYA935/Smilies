@@ -8,13 +8,17 @@ using Outlook = Microsoft.Office.Interop.Outlook;
 namespace MpcOutlookAddIn
 {
     /// <summary>
-    /// The sending side of MPC: port of mpc_mail_compose_send__() in send.c.
+    /// The sending side of MPC, based on mpc_mail_compose_send__() in send.c.
     /// <para>
     /// For a message whose first To recipient's domain publishes _mpc1._tcp / _mpc2._tcp SRV
-    /// records, the plain-text body is split into one chunk per server. Each chunk is sent as a
-    /// copy of the (saved) message, with X-MPC-Via, X-MPC-ID, X-MPC-Chunk and X-MPC-Result; only
-    /// the last chunk keeps the attachments, as in send.c. The original message is then closed
-    /// and its draft moved to Deleted Items.
+    /// records, the plain-text body and every attachment are split into additive secret shares
+    /// over Z_p (p = 2^61 - 1), one share per server. Each email-share carries a share of the
+    /// body and of every attachment as .bin files, with a placeholder body. The message is
+    /// saved first, and every share is sent as a copy of the saved message (the message open
+    /// in the editor isn't changed, because Outlook would overwrite those changes with the
+    /// editor's contents when sending). Every share carries X-MPC-Via, X-MPC-ID, X-MPC-Chunk,
+    /// X-MPC-Result and X-MPC-Scheme. The original is then closed and its draft moved to
+    /// Deleted Items.
     /// </para>
     /// </summary>
     internal sealed class OutlookMpcSender
@@ -25,7 +29,7 @@ namespace MpcOutlookAddIn
         private readonly Func<MpcSettings> _settings;
         private readonly Func<ISrvResolver> _resolverFactory;
 
-        // True while this class sends chunks itself, so its own ItemSend calls pass through.
+        // True while this class sends shares itself, so its own ItemSend calls pass through.
         private bool _sendingChunks;
 
         public OutlookMpcSender(Outlook.Application application, Func<MpcSettings> settings, Func<ISrvResolver> resolverFactory)
@@ -40,7 +44,7 @@ namespace MpcOutlookAddIn
             /// <summary>No MPC servers for this recipient: send the message unchanged.</summary>
             SendNormally,
 
-            /// <summary>Every chunk has been sent: don't send the original, discard it.</summary>
+            /// <summary>Every share has been sent: don't send the original, discard it.</summary>
             SentAsChunks,
 
             /// <summary>Do not send.</summary>
@@ -58,7 +62,7 @@ namespace MpcOutlookAddIn
             try
             {
                 if (!_settings().AutoSplitOnSend) return;
-                if (OutlookMpc.GetInternetHeader(mail, MpcConstants.HeaderChunkId) != null) return; // already a chunk
+                if (OutlookMpc.GetInternetHeader(mail, MpcConstants.HeaderChunkId) != null) return; // already a share
 
                 Outcome outcome = Prepare(mail, false);
                 if (outcome == Outcome.Cancel)
@@ -67,7 +71,7 @@ namespace MpcOutlookAddIn
                 }
                 else if (outcome == Outcome.SentAsChunks)
                 {
-                    cancel = true; // the chunks went out instead of this message
+                    cancel = true; // the shares went out instead of this message
                     DiscardOriginalLater(mail);
                 }
             }
@@ -88,7 +92,7 @@ namespace MpcOutlookAddIn
             {
                 if (OutlookMpc.GetInternetHeader(mail, MpcConstants.HeaderChunkId) != null)
                 {
-                    MessageBox.Show("This message is already an MPC chunk.", Caption, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    MessageBox.Show("This message is already an MPC share.", Caption, MessageBoxButtons.OK, MessageBoxIcon.Information);
                     return;
                 }
 
@@ -133,7 +137,7 @@ namespace MpcOutlookAddIn
 
                 DialogResult answer = MessageBox.Show(
                     "Could not look up the MPC servers for " + domain + ":\n\n" + ex.Message +
-                    "\n\nSend this as a normal (unsplit) message?",
+                    "\n\nSend this as a normal (unshared) message?",
                     Caption, MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
                 return answer == DialogResult.Yes ? Outcome.SendNormally : Outcome.Cancel;
             }
@@ -159,22 +163,28 @@ namespace MpcOutlookAddIn
             mail.Save();
             string body = mail.Body ?? string.Empty;
 
+            // 0. Read the text and attachments, and secret-share them. Nothing is changed yet.
             string mpcId = MpcSendPlanner.NewMpcId();
-            IReadOnlyList<OutgoingChunk> chunks = MpcSendPlanner.Plan(body, servers, mpcId);
-            AddInLog.Write("Splitting a " + body.Length + "-character message for " + domain + " into " + chunks.Count +
-                           " chunk(s) of " + string.Join(" + ", chunks.Select(c => c.Body.Length.ToString())) +
-                           " characters, X-MPC-ID " + mpcId + ", via " + string.Join(", ", chunks.Select(c => c.Via)));
+            List<MailFile> attachments = OutlookMpc.ReadAttachments(mail, null);
+            IReadOnlyList<OutgoingShare> shares = MpcSendPlanner.PlanShares(body, attachments, servers, mpcId);
+            if (shares.Count == 1)
+            {
+                AddInLog.Write("Only one MPC server for " + domain + ": its single share equals the message, so that server can read it.");
+            }
+            AddInLog.Write("Secret-sharing a " + body.Length + "-character message for " + domain + " into " + shares.Count +
+                           " share(s) with " + attachments.Count + " attachment(s), X-MPC-ID " + mpcId +
+                           ", via " + string.Join(", ", shares.Select(c => c.Via)));
 
-            // 1. Build every chunk as a copy of the saved message. The copy keeps recipients,
-            //    subject, account and attachments; and unlike the message open in the editor,
-            //    changes to it are not overwritten when it is sent. Nothing has been sent yet,
-            //    so on failure the copies are discarded and the original is left untouched.
+            // 1. Build every share as a copy of the saved message. The copy keeps recipients,
+            //    subject and account; and unlike the message open in the editor, changes to it
+            //    are not overwritten when it is sent. Nothing has been sent yet, so on failure
+            //    the copies are discarded and the original is left untouched.
             var created = new List<Outlook.MailItem>();
             try
             {
-                foreach (OutgoingChunk chunk in chunks)
+                foreach (OutgoingShare share in shares)
                 {
-                    created.Add(CreateChunkMessage(mail, chunk));
+                    created.Add(CreateShareMessage(mail, share));
                 }
             }
             catch (Exception)
@@ -196,11 +206,11 @@ namespace MpcOutlookAddIn
             }
             catch (Exception ex)
             {
-                AddInLog.Write("Sending MPC chunk " + (sent + 1) + " failed", ex);
+                AddInLog.Write("Sending MPC share " + (sent + 1) + " failed", ex);
                 foreach (Outlook.MailItem item in created.Skip(sent)) Discard(item);
                 MessageBox.Show(
-                    "Sending MPC chunk " + (sent + 1) + " of " + chunks.Count + " failed:\n\n" + ex.Message +
-                    (sent > 0 ? "\n\n" + sent + " chunk(s) were already sent. " : "\n\n") +
+                    "Sending MPC share " + (sent + 1) + " of " + shares.Count + " failed:\n\n" + ex.Message +
+                    (sent > 0 ? "\n\n" + sent + " share(s) were already sent. " : "\n\n") +
                     "Your message has not been sent.",
                     Caption, MessageBoxButtons.OK, MessageBoxIcon.Error);
                 return Outcome.Cancel;
@@ -215,7 +225,7 @@ namespace MpcOutlookAddIn
         }
 
         /// <summary>
-        /// After every chunk has gone out, closes the original message's window and moves its
+        /// After every share has gone out, closes the original message's window and moves its
         /// saved draft to Deleted Items. Runs a moment later, because Outlook doesn't allow
         /// closing the window from inside ItemSend or a ribbon callback.
         /// </summary>
@@ -260,7 +270,7 @@ namespace MpcOutlookAddIn
                 }
                 catch (Exception ex)
                 {
-                    AddInLog.Write("Could not remove the original draft after sending its MPC chunks", ex);
+                    AddInLog.Write("Could not remove the original draft after sending its MPC shares", ex);
                 }
                 finally
                 {
@@ -270,10 +280,10 @@ namespace MpcOutlookAddIn
             timer.Start();
         }
 
-        private Outlook.MailItem CreateChunkMessage(Outlook.MailItem original, OutgoingChunk chunk)
+        private Outlook.MailItem CreateShareMessage(Outlook.MailItem original, OutgoingShare share)
         {
-            // A copy of the saved original keeps its recipients, subject, importance and
-            // attachments exactly. It lands in Drafts until it is sent.
+            // A copy of the saved original keeps its recipients (To, Cc, Bcc), subject,
+            // importance and sensitivity exactly. It lands in Drafts until it is sent.
             var item = (Outlook.MailItem)original.Copy();
             try
             {
@@ -284,10 +294,9 @@ namespace MpcOutlookAddIn
                     OutlookMpc.Release(account);
                 }
 
-                // As in send.c, only the last chunk carries the attachments.
-                if (!chunk.CarriesAttachments) RemoveAttachments(item);
-
-                ApplyChunk(item, chunk);
+                // Replaces the copied attachments with this server's share files, and the body
+                // with the placeholder.
+                ApplyShare(item, share);
                 item.Save();
                 return item;
             }
@@ -298,33 +307,58 @@ namespace MpcOutlookAddIn
             }
         }
 
-        private static void RemoveAttachments(Outlook.MailItem item)
+        /// <summary>
+        /// Makes <paramref name="mail"/> an email-share: its attachments are replaced by this
+        /// server's share files, its body by a placeholder, and the X-MPC-* headers are set.
+        /// </summary>
+        private static void ApplyShare(Outlook.MailItem mail, OutgoingShare share)
         {
-            Outlook.Attachments attachments = item.Attachments;
+            // Add the share files first. If that fails, remove what was added so the message
+            // (and its original attachments) are as the user left them.
+            int originalCount = OutlookMpc.AttachmentCount(mail);
             try
             {
-                for (int i = attachments.Count; i >= 1; i--)
+                OutlookMpc.AddAttachments(mail, share.Files);
+            }
+            catch (Exception)
+            {
+                try
                 {
-                    Outlook.Attachment attachment = attachments[i];
-                    attachment.Delete();
-                    OutlookMpc.Release(attachment);
+                    OutlookMpc.RemoveAttachmentsFrom(mail, originalCount + 1);
                 }
+                catch (Exception ex)
+                {
+                    AddInLog.Write("Could not remove share files after a failure", ex);
+                }
+                throw;
+            }
+
+            // The originals are now in the shares; none of their content may go out in the clear.
+            for (int i = originalCount; i >= 1; i--)
+            {
+                RemoveAttachment(mail, i);
+            }
+
+            // The body is shared as plain text, and the visible body is only a placeholder.
+            mail.BodyFormat = Outlook.OlBodyFormat.olFormatPlain;
+            mail.Body = share.Body;
+
+            foreach (KeyValuePair<string, string> header in share.Headers)
+            {
+                OutlookMpc.SetInternetHeader(mail, header.Key, header.Value);
+            }
+        }
+
+        private static void RemoveAttachment(Outlook.MailItem mail, int index)
+        {
+            Outlook.Attachments attachments = mail.Attachments;
+            try
+            {
+                attachments.Remove(index);
             }
             finally
             {
                 OutlookMpc.Release(attachments);
-            }
-        }
-
-        private static void ApplyChunk(Outlook.MailItem mail, OutgoingChunk chunk)
-        {
-            // mailutils sends and rejoins plain text, so each chunk is sent as plain text.
-            mail.BodyFormat = Outlook.OlBodyFormat.olFormatPlain;
-            mail.Body = chunk.Body;
-
-            foreach (KeyValuePair<string, string> header in chunk.Headers)
-            {
-                OutlookMpc.SetInternetHeader(mail, header.Key, header.Value);
             }
         }
 
@@ -353,7 +387,7 @@ namespace MpcOutlookAddIn
         }
 
         /// <summary>
-        /// Every chunk goes to every recipient, routed by the first To recipient's MPC servers
+        /// Every share goes to every recipient, routed by the first To recipient's MPC servers
         /// (as in send.c). Ask before doing that for recipients in other domains.
         /// </summary>
         private static bool ConfirmOtherDomains(Outlook.MailItem mail, string mpcDomain)
@@ -377,9 +411,9 @@ namespace MpcOutlookAddIn
             if (others.Count == 0) return true;
 
             return MessageBox.Show(
-                "This message will be split using the MPC servers of " + mpcDomain + ".\n\n" +
-                "Recipients at " + string.Join(", ", others) + " will receive the separate chunks too, " +
-                "and can only read the whole message if their mail program rejoins MPC chunks.\n\nContinue?",
+                "This message will be secret-shared using the MPC servers of " + mpcDomain + ".\n\n" +
+                "Recipients at " + string.Join(", ", others) + " will receive the separate shares too, " +
+                "and can only read the message if their mail program combines MPC shares.\n\nContinue?",
                 Caption, MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes;
         }
 
@@ -391,7 +425,7 @@ namespace MpcOutlookAddIn
             }
             catch (Exception ex)
             {
-                AddInLog.Write("Could not discard an unsent MPC chunk", ex);
+                AddInLog.Write("Could not discard an unsent MPC share", ex);
             }
         }
     }

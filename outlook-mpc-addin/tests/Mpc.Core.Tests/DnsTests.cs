@@ -122,6 +122,7 @@ namespace Mpc.Core.Tests
         private readonly Thread _udpThread;
         private readonly Thread _tcpThread;
         private volatile bool _stopping;
+        private const int PollMs = 50;
 
         public readonly Dictionary<string, SrvRecord[]> Zone = new Dictionary<string, SrvRecord[]>(StringComparer.OrdinalIgnoreCase);
         public bool TruncateUdp { get; set; }
@@ -131,6 +132,10 @@ namespace Mpc.Core.Tests
         public FakeDns()
         {
             _udp = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
+            // Short timeouts so the serving threads wake up regularly and can see _stopping.
+            // On macOS, .NET can't interrupt a blocked UDP receive, and disposing a socket while
+            // another thread waits on it never returns. Dispose() stops the threads first.
+            _udp.Client.ReceiveTimeout = PollMs;
             int port = ((IPEndPoint)_udp.Client.LocalEndPoint).Port;
             _tcp = new TcpListener(IPAddress.Loopback, port);
             _tcp.Start();
@@ -178,9 +183,17 @@ namespace Mpc.Core.Tests
             {
                 try
                 {
+                    // Poll instead of blocking in Accept, for the same macOS reason as above.
+                    if (!_tcp.Pending())
+                    {
+                        Thread.Sleep(PollMs);
+                        continue;
+                    }
+
                     using (TcpClient client = _tcp.AcceptTcpClient())
                     using (NetworkStream s = client.GetStream())
                     {
+                        client.ReceiveTimeout = 1000;
                         Interlocked.Increment(ref TcpQueries);
                         int len = (s.ReadByte() << 8) | s.ReadByte();
                         var query = new byte[len];
@@ -262,6 +275,9 @@ namespace Mpc.Core.Tests
         public void Dispose()
         {
             _stopping = true;
+            // Let both threads leave their loops before closing the sockets they use.
+            _udpThread.Join(2000);
+            _tcpThread.Join(2000);
             _udp.Dispose();
             _tcp.Stop();
         }

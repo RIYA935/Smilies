@@ -9,7 +9,7 @@
                   size="large"
                   imageMso="EncryptMessage"
                   screentip="Send via MPC"
-                  supertip="Splits this message into chunks, one per MPC server published by the recipient's domain (_mpc1._tcp, _mpc2._tcp SRV records), adds the X-MPC-* headers, and sends them. The message is sent as plain text."
+                  supertip="Secret-shares the text and every attachment into additive shares (mod 2^61 - 1), one per MPC server published by the recipient's domain (_mpc1._tcp, _mpc2._tcp SRV records), and sends each share with the X-MPC-* headers. Each MPC server relays only its own share, which reveals nothing on its own. The text is sent as plain text."
                   onAction="OnSendViaMpc" />
         </group>
       </tab>

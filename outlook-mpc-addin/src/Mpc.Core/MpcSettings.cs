@@ -68,7 +68,7 @@ namespace Mpc.Core
                 "DeleteChunksAfterRejoin=" + Format(DeleteChunksAfterRejoin),
                 "RejoinLookbackDays=" + RejoinLookbackDays.ToString(CultureInfo.InvariantCulture),
                 "# Comma-separated DNS servers for _mpcN._tcp SRV lookups; empty uses this computer's DNS",
-                "DnsServers=" + (DnsServers ?? string.Empty),
+                "DnsServers=" + (DnsServers ?? string.Empty).Replace("\r", " ").Replace("\n", " "),
                 "DnsTimeoutMs=" + DnsTimeoutMs.ToString(CultureInfo.InvariantCulture),
             };
             File.WriteAllLines(path, lines.ToArray(), new UTF8Encoding(false));

@@ -108,6 +108,9 @@
   </ItemGroup>
   <!-- The Outlook-independent MPC logic, compiled into the add-in so it ships as one assembly. -->
   <ItemGroup>
+    <Compile Include="..\Mpc.Core\AdditiveSharing.cs">
+      <Link>Core\AdditiveSharing.cs</Link>
+    </Compile>
     <Compile Include="..\Mpc.Core\BodyChunker.cs">
       <Link>Core\BodyChunker.cs</Link>
     </Compile>
@@ -140,6 +143,15 @@
     </Compile>
     <Compile Include="..\Mpc.Core\MpcSettings.cs">
       <Link>Core\MpcSettings.cs</Link>
+    </Compile>
+    <Compile Include="..\Mpc.Core\PrimeField.cs">
+      <Link>Core\PrimeField.cs</Link>
+    </Compile>
+    <Compile Include="..\Mpc.Core\SharedMessage.cs">
+      <Link>Core\SharedMessage.cs</Link>
+    </Compile>
+    <Compile Include="..\Mpc.Core\SharePayload.cs">
+      <Link>Core\SharePayload.cs</Link>
     </Compile>
     <Compile Include="..\Mpc.Core\SrvRecord.cs">
       <Link>Core\SrvRecord.cs</Link>
@@ -191,7 +203,7 @@
   <ProjectExtensions>
     <VisualStudio>
       <FlavorProperties GUID="{BAA0C2D2-18E2-41B9-852F-F413020CAA33}">
-        <ProjectProperties HostName="Outlook" HostPackage="{29A7B9D7-A7F1-4328-8EF0-6B2D1A56B2C1}" OfficeVersion="15.0" VstxVersion="4.0" ApplicationType="Outlook" Language="cs" TemplatesPath="" DebugInfoExeName="#Software\Microsoft\Office\16.0\Outlook\InstallRoot\Path#outlook.exe" AddItemTemplatesGuid="{A58A78EB-1C92-4DDD-80CF-E8BD872ABFC4}" />
+        <ProjectProperties HostName="Outlook" HostPackage="{29A7B9D7-A7F1-4328-8EF0-6B2D1A56B2C1}" OfficeVersion="15.0" VstxVersion="4.0" ApplicationType="Outlook" Language="cs" TemplatesPath="" DebugInfoExeName="#Software\Microsoft\Office\15.0\Outlook\InstallRoot\Path#outlook.exe" AddItemTemplatesGuid="{A58A78EB-1C92-4DDD-80CF-E8BD872ABFC4}" />
         <Host Name="Outlook" GeneratedCodeNamespace="MpcOutlookAddIn" IconIndex="0">
           <HostItem Name="ThisAddIn" Code="ThisAddIn.cs" CanonicalName="AddIn" CanActivate="false" IconIndex="1" Blueprint="ThisAddIn.Designer.xml" GeneratedCode="ThisAddIn.Designer.cs" />
         </Host>

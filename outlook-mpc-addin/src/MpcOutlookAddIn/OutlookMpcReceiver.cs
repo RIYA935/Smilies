@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
-using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -37,15 +36,6 @@ namespace MpcOutlookAddIn
     }
 
     /// <summary>
-    /// The receiving side of MPC: port of maildir_mpc_coaelesce_mails_unlocked() in mail.c.
-    /// <para>
-    /// Chunks are found by reading the X-MPC-* fields from each message's Internet headers and
-    /// grouped by X-MPC-ID. When every chunk of a message has arrived, a copy of chunk 1 gets
-    /// the joined body, attachments from the other chunks, X-MPC-Chunk "[000/000]" and the
-    /// combined X-MPC-Via; the chunks are then moved to Deleted Items.
-    /// </para>
-    /// </summary>
-    /// <summary>
     /// What the scan remembers about a chunk. The message itself is not kept: with IMAP, Outlook
     /// keeps updating unread messages in the background (finishing the download, syncing flags),
     /// and a message object held across that becomes stale; Outlook then refuses to copy it
@@ -63,6 +53,24 @@ namespace MpcOutlookAddIn
         public string Subject { get; private set; }
     }
 
+    /// <summary>
+    /// The receiving side of MPC, based on maildir_mpc_coaelesce_mails_unlocked() in mail.c.
+    /// <para>
+    /// Pieces are found by reading the X-MPC-* fields from each message's Internet headers and
+    /// grouped by X-MPC-ID. When every piece of a message has arrived, a copy of piece 1 gets the
+    /// rebuilt content, X-MPC-Chunk "[000/000]" and the combined X-MPC-Via; the pieces are then
+    /// marked as rejoined and moved to Deleted Items. The content is rebuilt in one of two ways:
+    /// </para>
+    /// <list type="bullet">
+    /// <item>X-MPC-Scheme "additive-p61" (sent by this add-in): the .bin share files of every
+    /// piece are added up mod p to rebuild the body and the attachments.</item>
+    /// <item>No X-MPC-Scheme (sent by mailutils): the body slices are joined in order and the
+    /// attachments copied from the other pieces.</item>
+    /// </list>
+    /// <para>
+    /// Every step opens the piece fresh from the mailbox (see <see cref="ChunkRef"/>).
+    /// </para>
+    /// </summary>
     internal sealed class OutlookMpcReceiver
     {
         // MAPI_E_OBJECT_CHANGED: the message changed in the mailbox after it was opened.
@@ -158,27 +166,56 @@ namespace MpcOutlookAddIn
             IReadOnlyList<ReceivedChunk<ChunkRef>> parts = group.Chunks;
             string firstId = parts[0].Item.EntryId;
 
-            // Every step opens the chunk fresh from the mailbox, and retries if Outlook reports
+            if (!group.HasOneScheme)
+            {
+                throw new InvalidOperationException("Its pieces have different X-MPC-Scheme values.");
+            }
+
+            // For shares, rebuild everything before touching the mailbox: if the shares don't
+            // add up, nothing is created and the pieces stay where they are.
+            SharedMessage rebuilt = null;
+            if (group.IsAdditiveShares)
+            {
+                var filesPerShare = parts
+                    .Select(p => WithChunk(p.Item.EntryId, storeId, "read share files",
+                        m => (IReadOnlyList<MailFile>)OutlookMpc.ReadAttachments(m, SharedMessage.IsShareFileName)))
+                    .ToList();
+                rebuilt = SharedMessage.Combine(filesPerShare);
+            }
+            else if (group.Scheme != null)
+            {
+                throw new NotSupportedException("Unknown X-MPC-Scheme \"" + group.Scheme + "\".");
+            }
+
+            // Every step opens the piece fresh from the mailbox, and retries if Outlook reports
             // that it changed in the meantime.
-            // Copy() keeps the sender, recipients, dates and folder of chunk 1.
-            var merged = WithChunk(firstId, storeId, "copy chunk 1", m => (Outlook.MailItem)m.Copy());
+            // Copy() keeps the sender, recipients, dates and folder of piece 1.
+            var merged = WithChunk(firstId, storeId, "copy piece 1", m => (Outlook.MailItem)m.Copy());
             try
             {
                 merged.BodyFormat = Outlook.OlBodyFormat.olFormatPlain;
-                merged.Body = MpcCoalescer.MergeBodies(
-                    parts.Select(p => WithChunk(p.Item.EntryId, storeId, "read a chunk", m => m.Body ?? string.Empty)).ToList());
 
-                // send.c attaches files to the last chunk; the copy of chunk 1 needs them.
-                foreach (ReceivedChunk<ChunkRef> part in parts.Skip(1))
+                if (rebuilt != null)
                 {
-                    WithChunk(part.Item.EntryId, storeId, "copy attachments", m =>
+                    // The copy carries piece 1's share files; replace them with the real files.
+                    OutlookMpc.RemoveAttachmentsFrom(merged, 1);
+                    merged.Body = rebuilt.Body;
+                    OutlookMpc.AddAttachments(merged, rebuilt.Attachments);
+                }
+                else
+                {
+                    merged.Body = MpcCoalescer.MergeBodies(
+                        parts.Select(p => WithChunk(p.Item.EntryId, storeId, "read a chunk", m => m.Body ?? string.Empty)).ToList());
+
+                    // send.c attaches files to the last chunk; the copy of chunk 1 needs them.
+                    foreach (ReceivedChunk<ChunkRef> part in parts.Skip(1))
                     {
-                        CopyAttachments(m, merged);
-                        return true;
-                    });
+                        List<MailFile> files = WithChunk(part.Item.EntryId, storeId, "read attachments", m => OutlookMpc.ReadAttachments(m, null));
+                        OutlookMpc.AddAttachments(merged, files);
+                    }
                 }
 
-                merged.UnRead = parts.Any(p => WithChunk(p.Item.EntryId, storeId, "read a chunk", m => m.UnRead));
+                merged.UnRead = parts.Any(p => WithChunk(p.Item.EntryId, storeId, "read a piece", m => m.UnRead));
 
                 // As mail.c does: mark the message as rejoined and record every relay.
                 string headers = OutlookMpc.GetTransportHeaders(merged)
@@ -210,24 +247,28 @@ namespace MpcOutlookAddIn
                 OutlookMpc.Release(merged);
             }
 
-            AddInLog.Write("Rejoined X-MPC-ID " + group.MpcId + " (" + parts.Count + " chunks via " + group.MergedVia + ").");
+            AddInLog.Write("Rejoined X-MPC-ID " + group.MpcId + " (" + parts.Count + (rebuilt != null ? " shares" : " chunks") +
+                           " via " + group.MergedVia + ").");
 
-            if (_settings().DeleteChunksAfterRejoin)
+            bool delete = _settings().DeleteChunksAfterRejoin;
+            foreach (ReceivedChunk<ChunkRef> part in parts.Concat(group.Extras))
             {
-                foreach (ReceivedChunk<ChunkRef> part in parts.Concat(group.Extras))
+                try
                 {
-                    try
+                    WithChunk(part.Item.EntryId, storeId, delete ? "mark and delete a piece" : "mark a piece", m =>
                     {
-                        WithChunk(part.Item.EntryId, storeId, "delete a chunk", m =>
-                        {
-                            m.Delete(); // moves to Deleted Items
-                            return true;
-                        });
-                    }
-                    catch (Exception ex)
-                    {
-                        AddInLog.Write("Could not delete an MPC chunk after rejoining", ex);
-                    }
+                        // Mark every piece so a later pass never rebuilds this message again,
+                        // even when the pieces are kept (DeleteChunksAfterRejoin=false).
+                        OutlookMpc.MarkRejoined(m);
+                        m.Save();
+
+                        if (delete) m.Delete(); // moves to Deleted Items
+                        return true;
+                    });
+                }
+                catch (Exception ex)
+                {
+                    AddInLog.Write("Could not mark or delete an MPC piece after rejoining", ex);
                 }
             }
         }
@@ -272,59 +313,6 @@ namespace MpcOutlookAddIn
             {
                 OutlookMpc.Release(session);
             }
-        }
-
-        private static void CopyAttachments(Outlook.MailItem from, Outlook.MailItem to)
-        {
-            Outlook.Attachments source = from.Attachments;
-            Outlook.Attachments target = to.Attachments;
-            string tempDir = Path.Combine(Path.GetTempPath(), "MpcOutlookAddIn", Guid.NewGuid().ToString("N"));
-            try
-            {
-                int count = source.Count;
-                if (count == 0) return;
-                Directory.CreateDirectory(tempDir);
-
-                for (int i = 1; i <= count; i++)
-                {
-                    Outlook.Attachment attachment = source[i];
-                    try
-                    {
-                        string name = SafeFileName(attachment.FileName, i);
-                        string path = Path.Combine(tempDir, i.ToString(CultureInfo.InvariantCulture) + "_" + name);
-                        attachment.SaveAsFile(path);
-                        Outlook.Attachment added = target.Add(path, Outlook.OlAttachmentType.olByValue, Type.Missing, attachment.DisplayName);
-                        OutlookMpc.Release(added);
-                    }
-                    finally
-                    {
-                        OutlookMpc.Release(attachment);
-                    }
-                }
-            }
-            finally
-            {
-                OutlookMpc.Release(source);
-                OutlookMpc.Release(target);
-                try
-                {
-                    if (Directory.Exists(tempDir)) Directory.Delete(tempDir, true);
-                }
-                catch (IOException)
-                {
-                    // Outlook may still hold a file; Windows cleans the temp folder eventually.
-                }
-                catch (UnauthorizedAccessException)
-                {
-                }
-            }
-        }
-
-        private static string SafeFileName(string name, int index)
-        {
-            if (string.IsNullOrWhiteSpace(name)) return "attachment" + index;
-            foreach (char c in Path.GetInvalidFileNameChars()) name = name.Replace(c, '_');
-            return name;
         }
 
         /// <summary>Limits the scan to recently received messages (RejoinLookbackDays).</summary>

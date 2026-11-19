@@ -2,7 +2,7 @@ using System.Reflection;
 using System.Runtime.InteropServices;
 
 [assembly: AssemblyTitle("MPC Outlook Add-in")]
-[assembly: AssemblyDescription("Splits outgoing mail into X-MPC chunks and rejoins incoming X-MPC chunks")]
+[assembly: AssemblyDescription("Secret-shares outgoing mail via MPC servers and rejoins incoming shares.")]
 [assembly: AssemblyConfiguration("")]
 [assembly: AssemblyCompany("")]
 [assembly: AssemblyProduct("MpcOutlookAddIn")]
