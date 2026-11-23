@@ -185,6 +185,17 @@ are then moved to **Deleted Items** (you can turn this off in the settings).
 Chunks from mailutils (no `X-MPC-Scheme` header) are rejoined as before: the body slices are joined
 in order and the attachments copied from the other chunks.
 
+**Sender checks (stage 1 of malware detection).** Before rejoining, the add-in checks that every
+chunk passed SPF, DKIM and DMARC at the MPC relay it entered through: the relay named in its
+`X-MPC-Via`, which records its results in `Authentication-Results` headers named after itself (see
+the lab's [Sender checks](../lab/aws-opentofu/README.md#sender-checks-stage-1)). For every chunk,
+the results from that relay must say `dmarc=pass` and `dkim=pass` for the From: domain, and all
+chunks must have the same From: address. Results from any other server are ignored, and a chunk
+without results from its relay fails. A message that fails is not rejoined: its chunks stay where
+they are, and **Rejoin MPC Chunks** lists it under "failed the sender checks" with the reason
+(the full list is in the log). Turn this off with `RequireSenderChecks=false`, for mail servers
+that don't add these results.
+
 ### Settings
 
 `%APPDATA%\MpcOutlookAddIn\settings.ini` (restart Outlook after editing it):
@@ -198,6 +209,8 @@ RejoinLookbackDays=30
 # Comma-separated DNS servers for the SRV lookups; empty uses this computer's DNS
 DnsServers=
 DnsTimeoutMs=2000
+# Rejoin only messages whose chunks all passed the sender checks (SPF, DKIM, DMARC at their MPC relay)
+RequireSenderChecks=true
 ```
 
 The log is at `%LOCALAPPDATA%\MpcOutlookAddIn\mpc.log`.
@@ -298,13 +311,16 @@ These are deliberate. Most avoid failure cases in the current C code:
 
 ## Testing status
 
-- `tests/Mpc.Core.Tests`: 43 tests covering header formats, chunk sizes against the C formula,
+- `tests/Mpc.Core.Tests`: 56 tests covering header formats, chunk sizes against the C formula,
   UTF-8 boundaries, header parsing and rewriting, grouping (out of order, incomplete, duplicates),
   SRV lookups against an in-process DNS server over UDP and TCP (including NXDOMAIN, SERVFAIL and
   timeouts), and secret sharing: field arithmetic, packing, sharing and reconstruction for 1 to 5
   servers, redrawing random values equal to p, the share-file format and its validation, rejecting
   shares that don't belong together, safe file names, and a full send-to-combine round trip with
-  attachments.
+  attachments; and the sender checks: parsing `Authentication-Results` (using the exact headers
+  Postfix, OpenDKIM, OpenDMARC and postfix-policyd-spf-python add in the lab's configuration), and
+  passing or failing a message (forged chunk, results from the wrong relay, SPF without DKIM, a
+  DKIM signature or DMARC result for another domain, different senders, missing results).
 - The add-in code compiles against the .NET Framework 4.8 reference assemblies at C# 7.3.
 
 It **has not yet been run inside Outlook**. On first use, check these:
@@ -318,3 +334,6 @@ It **has not yet been run inside Outlook**. On first use, check these:
 4. Rejoining a two-chunk message from `mail` gives exactly the original text, with no extra line
    break where the chunks meet.
 5. The rebuilt message appears in the same folder, with the original sender and date.
+6. With the lab's sender checks: every chunk shows three `Authentication-Results` lines from its
+   entry relay, and the message is rejoined; with `RequireSenderChecks=false` on a lab built
+   before them, messages still rejoin.
