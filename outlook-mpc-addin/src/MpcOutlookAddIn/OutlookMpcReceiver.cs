@@ -17,7 +17,9 @@ namespace MpcOutlookAddIn
         public int Rejoined;
         public int Waiting;
         public int Failed;
+        public int FailedSenderChecks;
         public readonly List<string> WaitingDetails = new List<string>();
+        public readonly List<string> SenderCheckDetails = new List<string>();
 
         public override string ToString()
         {
@@ -29,6 +31,11 @@ namespace MpcOutlookAddIn
             {
                 lines.Add(Waiting + " message(s) are still waiting for chunks:");
                 lines.AddRange(WaitingDetails.Take(10).Select(d => "  • " + d));
+            }
+            if (FailedSenderChecks > 0)
+            {
+                lines.Add(FailedSenderChecks + " message(s) failed the sender checks and were not rejoined:");
+                lines.AddRange(SenderCheckDetails.Take(10).Select(d => "  • " + d));
             }
             if (Failed > 0) lines.Add(Failed + " message(s) could not be rejoined; see " + AddInLog.LogPath + ".");
             return string.Join(Environment.NewLine, lines);
@@ -130,6 +137,21 @@ namespace MpcOutlookAddIn
                     continue;
                 }
 
+                // Stage 1 (sender checks): every chunk must have passed SPF/DKIM/DMARC at the relay
+                // named in its X-MPC-Via. The chunks are left as they are, so a message rejoins once
+                // the setting is turned off, and they show up in every report until then.
+                if (_settings().RequireSenderChecks)
+                {
+                    SenderCheckResult check = SenderChecks.Evaluate(group);
+                    if (!check.Passed)
+                    {
+                        report.FailedSenderChecks++;
+                        report.SenderCheckDetails.Add("\"" + group.Chunks[0].Item.Subject + "\": " + check.Problems[0]);
+                        AddInLog.Write("Not rejoining X-MPC-ID " + group.MpcId + ": sender checks failed: " + string.Join("; ", check.Problems));
+                        continue;
+                    }
+                }
+
                 try
                 {
                     Rejoin(group, storeId);
@@ -143,7 +165,8 @@ namespace MpcOutlookAddIn
             }
 
             AddInLog.Write("Rejoin pass on \"" + folder.Name + "\": scanned " + report.Scanned + ", chunks " + report.ChunksFound +
-                           ", rejoined " + report.Rejoined + ", waiting " + report.Waiting + ", failed " + report.Failed + ".");
+                           ", rejoined " + report.Rejoined + ", waiting " + report.Waiting + ", failed sender checks " + report.FailedSenderChecks +
+                           ", failed " + report.Failed + ".");
             return report;
         }
 
