@@ -5,10 +5,15 @@
 #   mailhost  Postfix for its mail domain + SMTP submission and Dovecot IMAP for the mail user.
 #             Mail its user submits (port 587) goes through the X-MPC-Via rule; mail arriving
 #             from the relays (port 25) does not, so chunks are delivered instead of looping.
-#             Also runs dnsmasq: the DNS server for its own domain (A, MX, MPC SRV).
+#             Also runs dnsmasq: the DNS server for its own domain (A, MX, MPC SRV, and the
+#             SPF, DKIM and DMARC records). Sender checks: DKIM-signs what its users submit,
+#             refuses a MAIL FROM the logged-in user doesn't own, and keeps only the
+#             Authentication-Results its own domain's MPC relays added to incoming mail.
 #   relay     Plain Postfix relay for the lab network. Mail for a domain it is an entry relay
 #             of goes to its linked partner relay (transport table); everything else goes to
-#             the destination's MX. Never applies the X-MPC-Via rule.
+#             the destination's MX. Never applies the X-MPC-Via rule. Sender checks: refuses
+#             clients on the lab blocklist, and checks SPF, DKIM and DMARC on each chunk,
+#             recording the results in Authentication-Results (it tags; it doesn't reject).
 set -euo pipefail
 
 ROLE='${role}'
@@ -22,6 +27,9 @@ VPC_RESOLVER='${vpc_resolver}'
 LAB_DNS_SERVERS='${lab_dns_servers}'
 LAB_DNS_LISTEN='${lab_dns_listen}'
 LAB_DNS_DOMAINS='${lab_dns_domains}'
+DKIM_SELECTOR='${dkim_selector}'
+RELAY_ADDRESSES='${relay_addresses}'
+RELAY_FQDNS='${relay_fqdns}'
 
 export DEBIAN_FRONTEND=noninteractive
 log() { echo "[mpc-lab] $*"; }
@@ -40,9 +48,11 @@ chmod +x /usr/sbin/policy-rc.d
 echo "postfix postfix/main_mailer_type select Internet Site" | debconf-set-selections
 echo "postfix postfix/mailname string $FQDN" | debconf-set-selections
 
-PACKAGES="postfix ssl-cert"
+PACKAGES="postfix ssl-cert opendkim"
 if [ "$ROLE" = "mailhost" ]; then
   PACKAGES="$PACKAGES dovecot-core dovecot-imapd swaks libnet-ssleay-perl bind9-dnsutils"
+else
+  PACKAGES="$PACKAGES opendmarc postfix-policyd-spf-python"
 fi
 if [ "$RUN_LAB_DNS" = "yes" ]; then
   PACKAGES="$PACKAGES dnsmasq"
@@ -107,6 +117,87 @@ if [ "$ROLE" = "relay" ]; then
 ${relay_transport}
 EOF
   postconf -e "transport_maps=texthash:/etc/postfix/transport"
+
+  # --- Sender checks (stage 1) ----------------------------------------------------------------
+  # Each chunk is checked where it enters the recipient's MPC providers: the client's address
+  # against the blocklist, then SPF, DKIM and DMARC. The results go into Authentication-Results
+  # headers named after this relay; the Outlook add-in rejoins a message only when every chunk
+  # passed at the relay named in its X-MPC-Via. Failures are tagged, not rejected: if one relay
+  # rejected chunk 1 and another accepted chunk 2, the recipient would be left with half a
+  # message. A blocklisted client is refused, though: every relay sees the same client.
+  cat > /etc/postfix/mpc-blocklist <<'EOF'
+# Clients refused outright, one CIDR per line (blocked_cidrs in terraform.tfvars).
+%{ for c in blocked_cidrs ~}
+${c} REJECT Listed on the MPC lab blocklist
+%{ endfor ~}
+EOF
+
+  # SPF (postfix-policyd-spf-python). Mail from another relay is the second hop of a chunk:
+  # its address is not in the sender's SPF record, so SPF is skipped for the relays.
+  cat > /etc/postfix-policyd-spf-python/policyd-spf.conf <<EOF
+debugLevel = 1
+TestOnly = 1
+HELO_reject = False
+Mail_From_reject = False
+PermError_reject = False
+TempError_Defer = False
+Header_Type = AR
+Authserv_Id = $FQDN
+skip_addresses = 127.0.0.0/8,::ffff:127.0.0.0/104,::1,$RELAY_ADDRESSES
+EOF
+  postconf -M "policyd-spf/unix=policyd-spf unix - n n - 0 spawn user=policyd-spf argv=/usr/bin/policyd-spf"
+
+  # Mail from another relay (the second hop of a chunk) is passed on unchecked, keeping the
+  # entry relay's results. The list is for OpenDKIM (PeerList) and OpenDMARC (IgnoreHosts).
+  { echo 127.0.0.1; echo "$RELAY_ADDRESSES" | tr ',' '\n'; } > /etc/mpc-relay-peers
+
+  # DKIM (OpenDKIM, verifying). On mail from a sender it removes every Authentication-Results
+  # that claims to be from any MPC relay, so a sender can't forge a pass, not even for a
+  # different relay than the one it sends to (X-MPC-Via is written by the sender). Its own
+  # resolver (libunbound) asks systemd-resolved, which knows where the lab domains are.
+  cat > /etc/opendkim.conf <<EOF
+Syslog yes
+UMask 007
+UserID opendkim
+PidFile /run/opendkim/opendkim.pid
+Socket inet:8891@127.0.0.1
+Mode v
+AuthservID $FQDN
+AlwaysAddARHeader yes
+RemoveARFrom $RELAY_FQDNS
+PeerList /etc/mpc-relay-peers
+Canonicalization relaxed/relaxed
+Nameservers 127.0.0.53
+EOF
+
+  # DMARC (OpenDMARC). It takes the SPF and DKIM results above (same AuthservID) and checks
+  # that one of them passed for the domain in From:. It does not run its own SPF check, so
+  # there is only one SPF result.
+  cat > /etc/opendmarc.conf <<EOF
+Syslog true
+UMask 0002
+UserID opendmarc
+PidFile /run/opendmarc/opendmarc.pid
+Socket inet:8893@127.0.0.1
+AuthservID $FQDN
+TrustedAuthservIDs $FQDN
+IgnoreAuthenticatedClients true
+IgnoreHosts /etc/mpc-relay-peers
+RejectFailures false
+SPFSelfValidate false
+FailureReports false
+RequiredHeaders false
+PublicSuffixList /usr/share/publicsuffix/public_suffix_list.dat
+EOF
+
+  # If a checker is down, hold mail (tempfail) rather than pass it on unchecked.
+  postconf -e \
+    "smtpd_client_restrictions=check_client_access cidr:/etc/postfix/mpc-blocklist" \
+    "smtpd_recipient_restrictions=check_policy_service unix:private/policyd-spf" \
+    "policyd-spf_time_limit=3600" \
+    "smtpd_milters=inet:127.0.0.1:8891, inet:127.0.0.1:8893" \
+    "non_smtpd_milters=" \
+    "milter_default_action=tempfail"
 else
   postconf -e \
     "myorigin=\$mydomain" \
@@ -137,6 +228,50 @@ EOF
     "submission/inet/smtpd_client_restrictions=permit_sasl_authenticated,reject" \
     "submission/inet/smtpd_relay_restrictions=permit_sasl_authenticated,reject" \
     "submission/inet/cleanup_service_name=mpccleanup"
+
+  # --- Sender checks (stage 1) ----------------------------------------------------------------
+  # DKIM-sign every message a user submits (port 587), so the recipient's MPC relays can check
+  # it came from this domain unchanged. The X-MPC-* headers are signed too, so nobody can move
+  # a chunk into another message or position. The private key exists only on this server.
+  install -d -o opendkim -g opendkim -m 0750 /etc/opendkim/keys
+  cat > "/etc/opendkim/keys/$DKIM_SELECTOR.private" <<'EOF'
+${dkim_private_key}
+EOF
+  chown opendkim:opendkim "/etc/opendkim/keys/$DKIM_SELECTOR.private"
+  chmod 0600 "/etc/opendkim/keys/$DKIM_SELECTOR.private"
+  cat > /etc/opendkim.conf <<EOF
+Syslog yes
+UMask 007
+UserID opendkim
+PidFile /run/opendkim/opendkim.pid
+Socket inet:8891@127.0.0.1
+Mode s
+Domain $DOMAIN
+Selector $DKIM_SELECTOR
+KeyFile /etc/opendkim/keys/$DKIM_SELECTOR.private
+Canonicalization relaxed/relaxed
+SignHeaders From,To,Cc,Subject,Date,Message-ID,Reply-To,In-Reply-To,References,MIME-Version,Content-Type,Content-Transfer-Encoding,X-MPC-ID,X-MPC-Chunk,X-MPC-Scheme,X-MPC-Via
+OversignHeaders From
+EOF
+
+  # A logged-in user may only send as <their login>@<this domain> (MAIL FROM).
+  cat > /etc/postfix/sender_logins <<'EOF'
+/^([^@]+)@${domain_regex}$/ $1
+EOF
+  postconf -e "smtpd_sender_login_maps=regexp:/etc/postfix/sender_logins"
+  postconf -P \
+    "submission/inet/smtpd_sender_restrictions=reject_sender_login_mismatch" \
+    "submission/inet/smtpd_milters=inet:127.0.0.1:8891"
+
+  # Incoming mail (port 25) keeps only the Authentication-Results added by this domain's own MPC
+  # relays; any others (another relay's, or ones a sender wrote) are removed. Submission uses
+  # mpccleanup, so this doesn't apply to mail users send.
+  cat > /etc/postfix/inbound_header_checks <<'EOF'
+if /^Authentication-Results:/
+!/^Authentication-Results:[[:space:]]*(${provider_ids_regex})[[:space:]]*;/ IGNORE
+endif
+EOF
+  postconf -e "header_checks=regexp:/etc/postfix/inbound_header_checks"
 fi
 
 # --- Dovecot (IMAP for Outlook, and password checks for SMTP submission) ----------------------
@@ -168,6 +303,8 @@ fi
 postfix check
 [ "$ROLE" != "mailhost" ] || doveconf -n > /dev/null
 [ "$RUN_LAB_DNS" != "yes" ] || dnsmasq --test
+opendkim -n -x /etc/opendkim.conf
+[ "$ROLE" != "relay" ] || opendmarc -n -c /etc/opendmarc.conf
 
 systemctl restart systemd-resolved
 if [ "$RUN_LAB_DNS" = "yes" ]; then
@@ -177,6 +314,13 @@ fi
 if [ "$ROLE" = "mailhost" ]; then
   systemctl enable dovecot
   systemctl restart dovecot
+fi
+# The sender checks' services start before Postfix, which holds mail while they're down.
+systemctl enable opendkim
+systemctl restart opendkim
+if [ "$ROLE" = "relay" ]; then
+  systemctl enable opendmarc
+  systemctl restart opendmarc
 fi
 systemctl enable postfix
 systemctl restart postfix
