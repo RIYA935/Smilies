@@ -7,13 +7,16 @@ namespace Mpc.Core
     /// <summary>One received chunk, tied to whatever object holds the message (T).</summary>
     public sealed class ReceivedChunk<T>
     {
-        public ReceivedChunk(T item, string mpcId, ChunkValue chunk, string via, string scheme = null)
+        public ReceivedChunk(T item, string mpcId, ChunkValue chunk, string via, string scheme = null,
+            string from = null, IReadOnlyList<AuthenticationResults> authenticationResults = null)
         {
             Item = item;
             MpcId = mpcId;
             Chunk = chunk;
             Via = via ?? string.Empty;
             Scheme = string.IsNullOrWhiteSpace(scheme) ? null : scheme.Trim();
+            From = from;
+            AuthenticationResults = authenticationResults ?? new AuthenticationResults[0];
         }
 
         public T Item { get; private set; }
@@ -23,6 +26,12 @@ namespace Mpc.Core
 
         /// <summary>X-MPC-Scheme, or null for a mailutils chunk (a plain slice of the body).</summary>
         public string Scheme { get; private set; }
+
+        /// <summary>The From: header, for the sender checks; null if the chunk had none.</summary>
+        public string From { get; private set; }
+
+        /// <summary>Every Authentication-Results header on the chunk, for the sender checks.</summary>
+        public IReadOnlyList<AuthenticationResults> AuthenticationResults { get; private set; }
     }
 
     /// <summary>All the chunks that share one X-MPC-ID.</summary>
@@ -106,6 +115,8 @@ namespace Mpc.Core
         /// Reads the X-MPC-* headers from a raw header block. Returns null when the message is
         /// not an MPC chunk: no X-MPC-ID, a rejoined message ("[000/000]"), an unreadable
         /// X-MPC-Chunk, or no X-MPC-Via (mail.c treats the last case as an error and skips it).
+        /// It also keeps the From: header and every Authentication-Results header, for
+        /// <see cref="SenderChecks"/>.
         /// </summary>
         public static ReceivedChunk<T> TryReadChunk<T>(T item, string rawHeaders)
         {
@@ -120,7 +131,9 @@ namespace Mpc.Core
             if (via == null) return null;
 
             string scheme = InternetHeaders.GetFirst(rawHeaders, MpcConstants.HeaderScheme);
-            return new ReceivedChunk<T>(item, id.Trim(), chunk, via, scheme);
+            return new ReceivedChunk<T>(item, id.Trim(), chunk, via, scheme,
+                InternetHeaders.GetFirst(rawHeaders, "From"),
+                Mpc.Core.AuthenticationResults.FromHeaders(rawHeaders));
         }
 
         /// <summary>
