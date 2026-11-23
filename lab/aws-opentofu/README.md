@@ -82,7 +82,9 @@ The servers need **3–5 minutes** after `apply` to finish setting themselves up
 
 When you change the lab design, `apply` **replaces** every server whose setup changed, and their
 mailboxes are lost. The two mail servers keep their public IP addresses (Elastic IPs) and the
-passwords stay the same.
+passwords stay the same. (Adding the sender checks below changes every server's setup, so the
+first `apply` after it replaces all six. Users added with `New-LabMailUser.ps1` must be added
+again.)
 
 ## Check it works
 
@@ -166,6 +168,59 @@ four routes. On any server (EC2 console → instance → **Connect → Session M
 | partner relay | relay-c / relay-d → `relay=mail.blue.mpc[10.20.4.10]` | relay-a / relay-b → `relay=mail.green.mpc[10.20.1.10]` |
 | receiving mail server | `to=<bob@blue.mpc>, relay=local … delivered to maildir` | `to=<alice@green.mpc>, relay=local …` |
 
+## Sender checks (stage 1)
+
+Stage 1 of malware detection: checks on *who sent* a chunk, not on its contents, so no MPC is
+needed. Each chunk is checked where it enters the recipient's MPC providers (relay-a/b for mail to
+blue.mpc, relay-c/d for mail to green.mpc), and the Outlook add-in rejoins a message only when
+every chunk passed (its `RequireSenderChecks` setting).
+
+| Server | Adds | Checks | Action |
+|---|---|---|---|
+| DNS (each mail domain) | SPF `v=spf1 ip4:<its mail server> -all`, DKIM key at `mpc._domainkey.<domain>`, DMARC `v=DMARC1; p=reject; adkim=s; aspf=r` | — | — |
+| Sending mail server (port 587) | a DKIM signature (OpenDKIM), also over `X-MPC-Via/-ID/-Chunk/-Scheme` | the logged-in user owns the MAIL FROM address | refuses a MAIL FROM the user doesn't own |
+| Recipient's entry relays | `Authentication-Results: relay.provider-x.test; spf=… dkim=… dmarc=…` | blocklist (`blocked_cidrs`), SPF (postfix-policyd-spf-python), DKIM (OpenDKIM), DMARC (OpenDMARC) | refuses blocklisted clients; otherwise **tags** and passes the chunk on. Removes any results that arrive claiming to be from an MPC relay. Holds mail if a checker is down |
+| Partner relays (second hop) | — | nothing: the client is a relay, not the sender | passes the chunk on with the entry relay's results |
+| Recipient's mail server (port 25) | — | — | keeps only the `Authentication-Results` of its own domain's relays |
+| Outlook add-in | — | for each chunk, the results from the relay in its `X-MPC-Via`: `dmarc=pass` and `dkim=pass` from the From: domain; all chunks have the same From: | rejoins only if all pass; otherwise lists the message under "failed the sender checks" |
+
+The relays tag rather than reject: if relay-a rejected chunk 1 and relay-b accepted chunk 2, bob
+would be left with half a message. The add-in makes one decision for the whole message.
+
+**Check the records** from your laptop:
+
+```powershell
+tofu output -raw check_sender_records | Invoke-Expression
+```
+
+**See the results** on a chunk: in Outlook, **File → Properties → Internet headers**. A chunk to
+bob that passed carries three lines from its entry relay:
+
+```
+Authentication-Results: relay.provider-a.test; dmarc=pass (p=reject dis=none) header.from=green.mpc
+Authentication-Results: relay.provider-a.test; dkim=pass (2048-bit key; unprotected) header.d=green.mpc ...
+Authentication-Results: relay.provider-a.test; spf=pass (sender SPF authorized) smtp.mailfrom=green.mpc ...
+```
+
+**Send a forged message** from the wrong server: on `mx-recipient` (Session Manager, `sudo -i`),
+send "alice's" mail straight to blue.mpc's entry relay, unsigned:
+
+```bash
+swaks --server relay.provider-a.test --from alice@green.mpc --to bob@blue.mpc \
+      --header "From: Alice <alice@green.mpc>" --header "Subject: forged"
+```
+
+bob receives it with `spf=fail`, `dkim=none` and `dmarc=fail` from relay-a. (It isn't an MPC
+chunk, so the add-in doesn't rejoin it; a forged chunk would be listed under "failed the sender
+checks".)
+
+**Block a server**: add `blocked_cidrs = ["10.20.4.10/32"]` to `terraform.tfvars` and run
+`tofu apply` (this replaces the relays). Mail from mail.blue.mpc is then refused at the relays
+with `554 5.7.1 … Listed on the MPC lab blocklist`, and bob gets a bounce for alice-bound mail.
+
+**On a server**, the checks log to `/var/log/mail.log` (`grep -E 'opendkim|opendmarc|policyd-spf'`);
+`systemctl status opendkim opendmarc` shows the checkers.
+
 ## Troubleshooting
 
 | Symptom | Check |
@@ -174,6 +229,9 @@ four routes. On any server (EC2 console → instance → **Connect → Session M
 | Message goes out unsplit | `DnsServers=` line in `settings.ini` and Outlook restarted; the SRV check above; `%LOCALAPPDATA%\MpcOutlookAddIn\mpc.log` |
 | Outlook can't connect | Your public IP address still matches `admin_cidr`; setup finished (`/var/lib/mpc-lab/ready`) |
 | Mail stuck on a server | `postqueue -p` and `/var/log/mail.log` on that server |
+| Mail held on a relay or a mail server with `451 4.7.1 Service unavailable - try again later` | A sender-check service is down: `systemctl status opendkim opendmarc` on that server |
+| The add-in says a message "failed the sender checks" | The reason is in its report and in `mpc.log`. A lab built before the sender checks doesn't add `Authentication-Results`: run `tofu apply`, or set `RequireSenderChecks=false` in the add-in's settings |
+| `dkim=temperror` or `dkim=permerror (no key)` | The DKIM record: `tofu output -raw check_sender_records`, and `systemctl status systemd-resolved` on the relay |
 
 ## Cost and clean-up
 
@@ -183,6 +241,9 @@ roughly US$2.50–3 a day in Sydney while the lab exists, which the free-plan cr
 
 ## Notes
 
-- The mail passwords are in the OpenTofu state file and in the servers' user data. Treat both
-  as secrets; this lab is for testing only.
+- The mail passwords and the DKIM private keys are in the OpenTofu state file and in the servers'
+  user data (gzip-compressed, since a script with a DKIM key is over the 16 KB EC2 allows). Treat
+  both as secrets; this lab is for testing only. To read the user data:
+  `aws ec2 describe-instance-attribute --instance-id <id> --attribute userData --query UserData.Value --output text`,
+  then base64-decode and gunzip it.
 - These `.tf` files also work with Terraform 1.6 or later.
