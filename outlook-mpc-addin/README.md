@@ -189,7 +189,8 @@ in order and the attachments copied from the other chunks.
 chunk passed SPF, DKIM and DMARC at the MPC relay it entered through: the relay named in its
 `X-MPC-Via`, which records its results in `Authentication-Results` headers named after itself (see
 the lab's [Sender checks](../lab/aws-opentofu/README.md#sender-checks-stage-1)). For every chunk,
-the results from that relay must say `dmarc=pass` and `dkim=pass` for the From: domain, and all
+the results from that relay must say `spf=pass`, `dkim=pass` for the From: domain and
+`dmarc=pass`, with no other SPF, DKIM or DMARC result (a `pass` next to a `fail` fails), and all
 chunks must have the same From: address. Results from any other server are ignored, and a chunk
 without results from its relay fails. A message that fails is not rejoined: its chunks stay where
 they are, and **Rejoin MPC Chunks** lists it under "failed the sender checks" with the reason
@@ -311,16 +312,17 @@ These are deliberate. Most avoid failure cases in the current C code:
 
 ## Testing status
 
-- `tests/Mpc.Core.Tests`: 56 tests covering header formats, chunk sizes against the C formula,
+- `tests/Mpc.Core.Tests`: 59 tests covering header formats, chunk sizes against the C formula,
   UTF-8 boundaries, header parsing and rewriting, grouping (out of order, incomplete, duplicates),
   SRV lookups against an in-process DNS server over UDP and TCP (including NXDOMAIN, SERVFAIL and
   timeouts), and secret sharing: field arithmetic, packing, sharing and reconstruction for 1 to 5
   servers, redrawing random values equal to p, the share-file format and its validation, rejecting
   shares that don't belong together, safe file names, and a full send-to-combine round trip with
   attachments; and the sender checks: parsing `Authentication-Results` (using the exact headers
-  Postfix, OpenDKIM, OpenDMARC and postfix-policyd-spf-python add in the lab's configuration), and
-  passing or failing a message (forged chunk, results from the wrong relay, SPF without DKIM, a
-  DKIM signature or DMARC result for another domain, different senders, missing results).
+  OpenDKIM and OpenDMARC add in the lab's configuration), and passing or failing a message
+  (forged chunk, a forged pass next to the relay's real fail, a replayed chunk, results from the
+  wrong relay, SPF without DKIM, a DKIM signature or DMARC result for another domain, different
+  senders, missing results).
 - The add-in code compiles against the .NET Framework 4.8 reference assemblies at C# 7.3.
 
 It **has not yet been run inside Outlook**. On first use, check these:
