@@ -102,7 +102,7 @@ locals {
   # entry relay of. Mail for any other domain is delivered normally (MX lookup).
   relay_transport = {
     for k, h in local.hosts : k => join("\n", [
-      for d in sort(keys(local.mpc_srv)) : "${d} smtp:[${local.hosts[local.relay_partner[k]].fqdn}]"
+      for d in sort(keys(local.mpc_srv)) : "${d} smtp:[${local.hosts[local.relay_partner[k]].fqdn}]:2525"
       if contains(local.mpc_srv[d], k) && contains(keys(local.relay_partner), k)
     ]) if h.role == "relay"
   }
@@ -165,7 +165,6 @@ locals {
   # The relays' private addresses: a chunk arriving from one of them is on its second hop, so
   # the next relay doesn't check SPF (the address isn't the sender's).
   relay_addresses = join(",", [for k in sort(keys(local.hosts)) : "${local.private_ip[k]}/32" if local.hosts[k].role == "relay"])
-  relay_fqdns     = join(",", [for k in sort(keys(local.hosts)) : local.hosts[k].fqdn if local.hosts[k].role == "relay"])
 
   # For each mail domain, its MPC relays' names as a regular expression: the only
   # Authentication-Results its mail server keeps on incoming mail.
@@ -454,7 +453,6 @@ resource "aws_instance" "lab" {
     domain_regex       = replace(each.value.domain, ".", "\\.")
     provider_ids_regex = lookup(local.provider_ids_regex, each.value.domain, "")
     relay_addresses    = local.relay_addresses
-    relay_fqdns        = local.relay_fqdns
     blocked_cidrs      = var.blocked_cidrs
   }))
   user_data_replace_on_change = true

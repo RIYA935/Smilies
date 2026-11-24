@@ -179,10 +179,10 @@ every chunk passed (its `RequireSenderChecks` setting).
 |---|---|---|---|
 | DNS (each mail domain) | SPF `v=spf1 ip4:<its mail server> -all`, DKIM key at `mpc._domainkey.<domain>`, DMARC `v=DMARC1; p=reject; adkim=s; aspf=r` | — | — |
 | Sending mail server (port 587) | a DKIM signature (OpenDKIM), also over `X-MPC-Via/-ID/-Chunk/-Scheme` | the logged-in user owns the MAIL FROM address | refuses a MAIL FROM the user doesn't own |
-| Recipient's entry relays | `Authentication-Results: relay.provider-x.test; spf=… dkim=… dmarc=…` | blocklist (`blocked_cidrs`), SPF (postfix-policyd-spf-python), DKIM (OpenDKIM), DMARC (OpenDMARC) | refuses blocklisted clients; otherwise **tags** and passes the chunk on. Removes any results that arrive claiming to be from an MPC relay. Holds mail if a checker is down |
-| Partner relays (second hop) | — | nothing: the client is a relay, not the sender | passes the chunk on with the entry relay's results |
+| Recipient's entry relays (port 25) | `Authentication-Results: relay.provider-x.test; spf=… dkim=… dmarc=…` | blocklist (`blocked_cidrs`), DKIM (OpenDKIM), SPF and DMARC (OpenDMARC) | refuses blocklisted clients. First **removes every `Authentication-Results` line in the chunk**, so the sender can't write its own results; then checks, **tags** and passes the chunk on. Holds mail if a checker is down |
+| Partner relays (second hop, port 2525) | — | nothing: only the relays may use this port | passes the chunk on with the entry relay's results |
 | Recipient's mail server (port 25) | — | — | keeps only the `Authentication-Results` of its own domain's relays |
-| Outlook add-in | — | for each chunk, the results from the relay in its `X-MPC-Via`: `dmarc=pass` and `dkim=pass` from the From: domain; all chunks have the same From: | rejoins only if all pass; otherwise lists the message under "failed the sender checks" |
+| Outlook add-in | — | for each chunk, the results from the relay in its `X-MPC-Via`: `spf=pass`, `dkim=pass` from the From: domain and `dmarc=pass`, and no other SPF, DKIM or DMARC result; all chunks have the same From: | rejoins only if all pass; otherwise lists the message under "failed the sender checks" |
 
 The relays tag rather than reject: if relay-a rejected chunk 1 and relay-b accepted chunk 2, bob
 would be left with half a message. The add-in makes one decision for the whole message.
@@ -199,7 +199,7 @@ bob that passed carries three lines from its entry relay:
 ```
 Authentication-Results: relay.provider-a.test; dmarc=pass (p=reject dis=none) header.from=green.mpc
 Authentication-Results: relay.provider-a.test; dkim=pass (2048-bit key; unprotected) header.d=green.mpc ...
-Authentication-Results: relay.provider-a.test; spf=pass (sender SPF authorized) smtp.mailfrom=green.mpc ...
+Authentication-Results: relay.provider-a.test; spf=pass smtp.mailfrom=green.mpc
 ```
 
 **Send a forged message** from the wrong server: on `mx-recipient` (Session Manager, `sudo -i`),
@@ -218,7 +218,7 @@ checks".)
 `tofu apply` (this replaces the relays). Mail from mail.blue.mpc is then refused at the relays
 with `554 5.7.1 … Listed on the MPC lab blocklist`, and bob gets a bounce for alice-bound mail.
 
-**On a server**, the checks log to `/var/log/mail.log` (`grep -E 'opendkim|opendmarc|policyd-spf'`);
+**On a server**, the checks log to `/var/log/mail.log` (`grep -E 'opendkim|opendmarc'`);
 `systemctl status opendkim opendmarc` shows the checkers.
 
 ## Troubleshooting
