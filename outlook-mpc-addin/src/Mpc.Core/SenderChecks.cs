@@ -194,9 +194,9 @@ namespace Mpc.Core
     /// X-MPC-Via runs SPF, DKIM and DMARC and records the results in an Authentication-Results
     /// header named after itself, and the recipient's mail server removes any it didn't get from
     /// those relays. A message is rejoined only when, for every chunk, the results from its
-    /// relay say DMARC passed and a DKIM signature from the From: domain verified, and all chunks
-    /// have the same From: address. A chunk without results from its relay fails: unchecked is
-    /// not trusted.
+    /// relay say SPF passed, a DKIM signature from the From: domain verified and DMARC passed,
+    /// with no other result for those three; and all chunks have the same From: address. A chunk
+    /// without results from its relay fails: unchecked is not trusted.
     /// </para>
     /// </summary>
     public static class SenderChecks
@@ -231,21 +231,20 @@ namespace Mpc.Core
                     continue;
                 }
 
-                // DMARC: SPF or DKIM passed for the From: domain.
-                List<AuthResult> dmarc = results.Where(r => r.Method == "dmarc").ToList();
-                bool dmarcPass = dmarc.Any(r => r.Result == "pass" && SameDomain(r.GetProperty("header.from"), fromDomain, true));
-                if (!dmarcPass)
-                {
-                    problems.Add(label + ": DMARC " + (dmarc.Count == 0 ? "was not checked" : dmarc[0].Result) + " for " + fromDomain + " (at " + chunk.Via + ")");
-                }
-
+                // Every SPF, DKIM and DMARC result from the relay must be a pass, and each of the three
+                // must be there. The relay records all three for every chunk, so a pass written by
+                // the sender next to the relay's real "fail" can't outvote it.
+                // SPF: the chunk came straight from a server the sender's domain allows. (A genuine
+                // signed chunk resent from another server still passes DKIM; this catches it.)
+                Check(problems, label, chunk.Via, results, "spf", "SPF", r => true,
+                    "SPF {0} (at {1})");
                 // DKIM: a valid signature from the From: domain itself, so the chunk came from that
-                // domain's mail server unchanged (passing on SPF alone isn't enough).
-                bool dkimPass = results.Any(r => r.Method == "dkim" && r.Result == "pass" && SameDomain(r.GetProperty("header.d"), fromDomain, false));
-                if (!dkimPass)
-                {
-                    problems.Add(label + ": no valid DKIM signature from " + fromDomain + " (at " + chunk.Via + ")");
-                }
+                // domain's mail server unchanged.
+                Check(problems, label, chunk.Via, results, "dkim", "DKIM", r => SameDomain(r.GetProperty("header.d"), fromDomain, false),
+                    "no valid DKIM signature from " + fromDomain + " (at {1})");
+                // DMARC: SPF or DKIM passed for, and lines up with, the From: domain.
+                Check(problems, label, chunk.Via, results, "dmarc", "DMARC", r => SameDomain(r.GetProperty("header.from"), fromDomain, true),
+                    "DMARC {0} for " + fromDomain + " (at {1})");
             }
 
             if (fromAddresses.Count > 1)
@@ -254,6 +253,26 @@ namespace Mpc.Core
             }
 
             return new SenderCheckResult(problems);
+        }
+
+        /// <summary>
+        /// Adds a problem unless the relay's results for <paramref name="method"/> include a pass
+        /// that <paramref name="matches"/>, and nothing else.
+        /// </summary>
+        private static void Check(List<string> problems, string label, string relay, List<AuthResult> results,
+            string method, string name, Func<AuthResult, bool> matches, string missingFormat)
+        {
+            List<AuthResult> forMethod = results.Where(r => r.Method == method).ToList();
+            AuthResult notPassed = forMethod.FirstOrDefault(r => r.Result != "pass");
+            if (!forMethod.Any(r => r.Result == "pass" && matches(r)))
+            {
+                string result = forMethod.Count == 0 ? "was not checked" : notPassed != null ? notPassed.Result : "passed for another domain";
+                problems.Add(label + ": " + string.Format(CultureInfo.InvariantCulture, missingFormat, result, relay));
+            }
+            else if (notPassed != null)
+            {
+                problems.Add(label + ": " + name + " results disagree (pass and " + notPassed.Result + ") at " + relay);
+            }
         }
 
         private static string NormalizeHost(string host)
