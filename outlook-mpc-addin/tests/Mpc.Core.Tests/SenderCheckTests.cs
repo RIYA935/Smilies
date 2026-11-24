@@ -7,9 +7,9 @@ using System.Text;
 namespace Mpc.Core.Tests
 {
     /// <summary>
-    /// Stage 1 (sender checks). The Authentication-Results lines below are the ones Postfix with
-    /// postfix-policyd-spf-python, OpenDKIM and OpenDMARC (Ubuntu 24.04, as in the lab) added to a
-    /// chunk signed for green.mpc, configured as lab/aws-opentofu/templates/bootstrap.sh.tftpl does.
+    /// Stage 1 (sender checks). The Authentication-Results lines below are the ones OpenDKIM and
+    /// OpenDMARC (Ubuntu 24.04, as in the lab) added to a chunk for green.mpc, configured as
+    /// lab/aws-opentofu/templates/bootstrap.sh.tftpl does.
     /// </summary>
     public static class SenderCheckTests
     {
@@ -22,7 +22,7 @@ namespace Mpc.Core.Tests
             {
                 relay + "; dmarc=pass (p=reject dis=none) header.from=green.mpc",
                 relay + ";\r\n\tdkim=pass (2048-bit key; unprotected) header.d=green.mpc header.i=@green.mpc header.a=rsa-sha256 header.s=mpc header.b=zhixlIZt;\r\n\tdkim-atps=neutral",
-                relay + "; spf=pass (sender SPF authorized) smtp.mailfrom=green.mpc (client-ip=10.20.1.10; helo=mail.green.mpc; envelope-from=alice@green.mpc; receiver=blue.mpc)",
+                relay + "; spf=pass smtp.mailfrom=green.mpc",
             };
         }
 
@@ -33,7 +33,7 @@ namespace Mpc.Core.Tests
             {
                 relay + "; dmarc=fail (p=reject dis=none) header.from=green.mpc",
                 relay + "; dkim=none;\r\n\tdkim-atps=neutral",
-                relay + "; spf=fail (SPF fail - not authorized) smtp.mailfrom=green.mpc (client-ip=10.20.9.9; helo=evil; envelope-from=alice@green.mpc; receiver=blue.mpc)",
+                relay + "; spf=fail smtp.mailfrom=green.mpc",
             };
         }
 
@@ -74,7 +74,7 @@ namespace Mpc.Core.Tests
             AuthenticationResults dmarc, dkim, spf;
             Assert.True(AuthenticationResults.TryParse(Passed(RelayA)[0], out dmarc), "dmarc");
             Assert.True(AuthenticationResults.TryParse(Passed(RelayA)[1].Replace("\r\n", ""), out dkim), "dkim");
-            Assert.True(AuthenticationResults.TryParse(Passed(RelayA)[2], out spf), "spf");
+            Assert.True(AuthenticationResults.TryParse(RelayA + "; spf=pass (sender SPF authorized) smtp.mailfrom=green.mpc (client-ip=10.20.1.10; helo=mail.green.mpc)", out spf), "spf");
 
             Assert.Equal(RelayA, dmarc.AuthservId);
             Assert.Equal("dmarc", dmarc.Results[0].Method);
@@ -146,6 +146,43 @@ namespace Mpc.Core.Tests
 
             // Results from relay-b in another letter case, or with a trailing dot, do count.
             Assert.True(Check(Alice, Passed(RelayA), Alice, Passed("Relay.Provider-B.test.")).Passed, "case and trailing dot");
+        }
+
+        [Test]
+        public static void AForgedPassDoesNotOutvoteTheRelaysFail()
+        {
+            // What Sriram found: a sender adds "pass" lines in the relay's name. If any survive
+            // next to the relay's real results, the real "fail" and "none" still count.
+            var forgedPlusReal = Forged(RelayB).Concat(Passed(RelayB)).ToArray();
+            SenderCheckResult result = Check(Alice, Passed(RelayA), Alice, forgedPlusReal);
+            Assert.False(result.Passed, "fake passes beside real failures");
+            Assert.Sequence(new[]
+            {
+                "chunk 2: SPF results disagree (pass and fail) at " + RelayB,
+                "chunk 2: DKIM results disagree (pass and none) at " + RelayB,
+                "chunk 2: DMARC results disagree (pass and fail) at " + RelayB,
+            }, result.Problems, "problems");
+        }
+
+        [Test]
+        public static void FailsAReplayedChunk()
+        {
+            // A genuine signed chunk sent again from another server: DKIM and DMARC still pass,
+            // but SPF doesn't.
+            var replayed = new[] { Passed(RelayB)[0], Passed(RelayB)[1], RelayB + "; spf=fail smtp.mailfrom=green.mpc" };
+            SenderCheckResult result = Check(Alice, Passed(RelayA), Alice, replayed);
+            Assert.Equal("chunk 2: SPF fail (at " + RelayB + ")", result.Problems.Single());
+        }
+
+        [Test]
+        public static void EachCheckMustBeThere()
+        {
+            SenderCheckResult result = Check(Alice, Passed(RelayA), Alice, new[] { Passed(RelayB)[1] });
+            Assert.Sequence(new[]
+            {
+                "chunk 2: SPF was not checked (at " + RelayB + ")",
+                "chunk 2: DMARC was not checked for green.mpc (at " + RelayB + ")",
+            }, result.Problems, "only DKIM");
         }
 
         [Test]
