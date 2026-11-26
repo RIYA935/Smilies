@@ -18,8 +18,10 @@ namespace MpcOutlookAddIn
         public int Waiting;
         public int Failed;
         public int FailedSenderChecks;
+        public int SuspiciousDuplicates;
         public readonly List<string> WaitingDetails = new List<string>();
         public readonly List<string> SenderCheckDetails = new List<string>();
+        public readonly List<string> SuspiciousDetails = new List<string>();
 
         public override string ToString()
         {
@@ -36,6 +38,12 @@ namespace MpcOutlookAddIn
             {
                 lines.Add(FailedSenderChecks + " message(s) failed the sender checks and were not rejoined:");
                 lines.AddRange(SenderCheckDetails.Take(10).Select(d => "  • " + d));
+            }
+            if (SuspiciousDuplicates > 0)
+            {
+                lines.Add(SuspiciousDuplicates + " duplicate chunk(s) failed the sender checks; they were left in the folder, in the category \"" +
+                          OutlookMpcReceiver.SuspiciousCategory + "\":");
+                lines.AddRange(SuspiciousDetails.Take(10).Select(d => "  • " + d));
             }
             if (Failed > 0) lines.Add(Failed + " message(s) could not be rejoined; see " + AddInLog.LogPath + ".");
             return string.Join(Environment.NewLine, lines);
@@ -84,6 +92,9 @@ namespace MpcOutlookAddIn
         private const int ObjectChanged = unchecked((int)0x80040109);
         private const int MaxAttempts = 5;
 
+        /// <summary>Outlook category given to duplicate chunks that failed the sender checks.</summary>
+        internal const string SuspiciousCategory = "MPC: failed sender checks";
+
         private readonly Outlook.Application _application;
         private readonly Func<MpcSettings> _settings;
 
@@ -126,8 +137,9 @@ namespace MpcOutlookAddIn
 
             report.ChunksFound = chunks.Count;
 
-            foreach (ChunkGroup<ChunkRef> group in MpcCoalescer.Group(chunks))
+            foreach (ChunkGroup<ChunkRef> found in MpcCoalescer.Group(chunks))
             {
+                ChunkGroup<ChunkRef> group = found;
                 if (!group.IsComplete)
                 {
                     report.Waiting++;
@@ -140,8 +152,14 @@ namespace MpcOutlookAddIn
                 // Stage 1 (sender checks): every chunk must have passed SPF/DKIM/DMARC at the relay
                 // named in its X-MPC-Via. The chunks are left as they are, so a message rejoins once
                 // the setting is turned off, and they show up in every report until then.
+                // Every copy of a chunk is checked (a replayed or forged duplicate can carry the same
+                // X-MPC-ID): a passing copy is used where there is one, and copies that fail are kept
+                // and reported, not deleted with the rest.
+                SenderCheckSelection<ChunkRef> selection = null;
                 if (_settings().RequireSenderChecks)
                 {
+                    selection = SenderChecks.SelectPassing(group);
+                    group = selection.Group;
                     SenderCheckResult check = SenderChecks.Evaluate(group);
                     if (!check.Passed)
                     {
@@ -156,6 +174,7 @@ namespace MpcOutlookAddIn
                 {
                     Rejoin(group, storeId);
                     report.Rejoined++;
+                    if (selection != null) KeepSuspicious(selection, storeId, report);
                 }
                 catch (Exception ex)
                 {
@@ -166,6 +185,7 @@ namespace MpcOutlookAddIn
 
             AddInLog.Write("Rejoin pass on \"" + folder.Name + "\": scanned " + report.Scanned + ", chunks " + report.ChunksFound +
                            ", rejoined " + report.Rejoined + ", waiting " + report.Waiting + ", failed sender checks " + report.FailedSenderChecks +
+                           ", suspicious duplicates " + report.SuspiciousDuplicates +
                            ", failed " + report.Failed + ".");
             return report;
         }
@@ -294,6 +314,49 @@ namespace MpcOutlookAddIn
                     AddInLog.Write("Could not mark or delete an MPC piece after rejoining", ex);
                 }
             }
+        }
+
+        /// <summary>
+        /// After a message was rejoined, its duplicate chunks that failed the sender checks stay in
+        /// the folder for the user to see: they get the <see cref="SuspiciousCategory"/> category and
+        /// the rejoined marker (so later passes don't keep listing them as waiting), and are reported.
+        /// </summary>
+        private void KeepSuspicious(SenderCheckSelection<ChunkRef> selection, string storeId, RejoinReport report)
+        {
+            for (int i = 0; i < selection.Suspicious.Count; i++)
+            {
+                ReceivedChunk<ChunkRef> copy = selection.Suspicious[i];
+                string detail = "\"" + copy.Item.Subject + "\": " + selection.SuspiciousDetails[i];
+                report.SuspiciousDuplicates++;
+                report.SuspiciousDetails.Add(detail);
+                AddInLog.Write("Kept a suspicious duplicate of X-MPC-ID " + selection.Group.MpcId + ": " + selection.SuspiciousDetails[i]);
+                try
+                {
+                    WithChunk(copy.Item.EntryId, storeId, "mark a suspicious duplicate", m =>
+                    {
+                        OutlookMpc.MarkRejoined(m);
+                        m.Categories = AddCategory(m.Categories, SuspiciousCategory);
+                        m.Save();
+                        return true;
+                    });
+                }
+                catch (Exception ex)
+                {
+                    AddInLog.Write("Could not mark a suspicious duplicate", ex);
+                }
+            }
+        }
+
+        /// <summary>Adds <paramref name="category"/> to Outlook's comma-separated category list.</summary>
+        internal static string AddCategory(string categories, string category)
+        {
+            List<string> list = (categories ?? string.Empty)
+                .Split(new[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries)
+                .Select(c => c.Trim())
+                .Where(c => c.Length > 0)
+                .ToList();
+            if (!list.Contains(category, StringComparer.OrdinalIgnoreCase)) list.Add(category);
+            return string.Join(", ", list);
         }
 
         /// <summary>
