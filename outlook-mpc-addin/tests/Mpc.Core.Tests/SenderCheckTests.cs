@@ -228,6 +228,93 @@ namespace Mpc.Core.Tests
             Assert.Equal("chunk 2: no From: address", result.Problems.Single());
         }
 
+        private static SenderCheckSelection<string> Select(params ReceivedChunk<string>[] chunks)
+        {
+            IReadOnlyList<ChunkGroup<string>> groups = MpcCoalescer.Group(chunks);
+            Assert.Equal(1, groups.Count, "one message");
+            return SenderChecks.SelectPassing(groups[0]);
+        }
+
+        private static ReceivedChunk<string> Chunk(string item, int index, string via, string from, IEnumerable<string> results)
+        {
+            return MpcCoalescer.TryReadChunk(item, Headers(index, via, from, results));
+        }
+
+        private static string[] Replayed(string relay)
+        {
+            // A genuine signed chunk sent again from another server: only SPF fails.
+            return new[] { Passed(relay)[0], Passed(relay)[1], relay + "; spf=fail smtp.mailfrom=green.mpc" };
+        }
+
+        [Test]
+        public static void AReplayedDuplicateIsKeptAndReported()
+        {
+            SenderCheckSelection<string> selection = Select(
+                Chunk("genuine1", 1, RelayA, Alice, Passed(RelayA)),
+                Chunk("genuine2", 2, RelayB, Alice, Passed(RelayB)),
+                Chunk("replay1", 1, RelayA, Alice, Replayed(RelayA)));
+
+            Assert.Sequence(new[] { "genuine1", "genuine2" }, selection.Group.Chunks.Select(c => c.Item), "chunks used");
+            Assert.True(SenderChecks.Evaluate(selection.Group).Passed, "the message passes");
+            Assert.Equal(0, selection.Group.Extras.Count, "no harmless extras");
+            Assert.Sequence(new[] { "replay1" }, selection.Suspicious.Select(c => c.Item), "kept");
+            Assert.Equal("duplicate of chunk 1: SPF fail (at " + RelayA + ")", selection.SuspiciousDetails.Single());
+        }
+
+        [Test]
+        public static void APassingCopyIsUsedEvenWhenAForgedOneComesFirst()
+        {
+            // MpcCoalescer.Group picks the first copy it sees; a forged copy listed first must not
+            // stop the genuine message.
+            SenderCheckSelection<string> selection = Select(
+                Chunk("forged1", 1, RelayA, Alice, Forged(RelayA)),
+                Chunk("genuine1", 1, RelayA, Alice, Passed(RelayA)),
+                Chunk("genuine2", 2, RelayB, Alice, Passed(RelayB)));
+
+            Assert.Sequence(new[] { "genuine1", "genuine2" }, selection.Group.Chunks.Select(c => c.Item), "chunks used");
+            Assert.True(SenderChecks.Evaluate(selection.Group).Passed, "the message passes");
+            Assert.Sequence(new[] { "forged1" }, selection.Suspicious.Select(c => c.Item), "kept");
+            Assert.True(selection.SuspiciousDetails.Single().StartsWith("duplicate of chunk 1: SPF fail", StringComparison.Ordinal), selection.SuspiciousDetails.Single());
+        }
+
+        [Test]
+        public static void AnIdenticalPassingDuplicateIsAnExtra()
+        {
+            SenderCheckSelection<string> selection = Select(
+                Chunk("genuine1", 1, RelayA, Alice, Passed(RelayA)),
+                Chunk("copy1", 1, RelayA, Alice, Passed(RelayA)),
+                Chunk("genuine2", 2, RelayB, Alice, Passed(RelayB)));
+
+            Assert.Sequence(new[] { "genuine1", "genuine2" }, selection.Group.Chunks.Select(c => c.Item), "chunks used");
+            Assert.Sequence(new[] { "copy1" }, selection.Group.Extras.Select(c => c.Item), "extra, deleted as before");
+            Assert.Equal(0, selection.Suspicious.Count, "nothing suspicious");
+        }
+
+        [Test]
+        public static void ADuplicateFromSomeoneElseIsSuspicious()
+        {
+            SenderCheckSelection<string> selection = Select(
+                Chunk("genuine1", 1, RelayA, Alice, Passed(RelayA)),
+                Chunk("genuine2", 2, RelayB, Alice, Passed(RelayB)),
+                Chunk("other2", 2, RelayB, "Mallory <mallory@green.mpc>", Passed(RelayB)));
+
+            Assert.Equal("duplicate of chunk 2: From: mallory@green.mpc differs from the other chunks", selection.SuspiciousDetails.Single());
+            Assert.Equal(0, selection.Group.Extras.Count, "not an extra");
+        }
+
+        [Test]
+        public static void WhenEveryCopyFailsTheMessageFails()
+        {
+            SenderCheckSelection<string> selection = Select(
+                Chunk("forged1", 1, RelayA, Alice, Forged(RelayA)),
+                Chunk("replay1", 1, RelayA, Alice, Replayed(RelayA)),
+                Chunk("genuine2", 2, RelayB, Alice, Passed(RelayB)));
+
+            Assert.Equal("forged1", selection.Group.Chunks[0].Item);
+            Assert.False(SenderChecks.Evaluate(selection.Group).Passed, "the message fails");
+            Assert.Sequence(new[] { "replay1" }, selection.Suspicious.Select(c => c.Item), "the other copy");
+        }
+
         [Test]
         public static void GetsTheAddress()
         {
