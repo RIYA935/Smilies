@@ -187,6 +187,28 @@ namespace Mpc.Core
         public IReadOnlyList<string> Problems { get; private set; }
     }
 
+    /// <summary>What <see cref="SenderChecks.SelectPassing{T}"/> chose for one message.</summary>
+    public sealed class SenderCheckSelection<T>
+    {
+        internal SenderCheckSelection(ChunkGroup<T> group, IReadOnlyList<ReceivedChunk<T>> suspicious, IReadOnlyList<string> suspiciousDetails)
+        {
+            Group = group;
+            Suspicious = suspicious;
+            SuspiciousDetails = suspiciousDetails;
+        }
+
+        /// <summary>The message with a passing copy of each chunk where there is one; duplicates
+        /// that passed are its extras.</summary>
+        public ChunkGroup<T> Group { get; private set; }
+
+        /// <summary>Duplicates that failed the sender checks or have a different From: address.
+        /// Keep them; don't delete them with the rest.</summary>
+        public IReadOnlyList<ReceivedChunk<T>> Suspicious { get; private set; }
+
+        /// <summary>Why, one line per suspicious duplicate (same order).</summary>
+        public IReadOnlyList<string> SuspiciousDetails { get; private set; }
+    }
+
     /// <summary>
     /// Stage 1 of malware detection (sender and connection checks), on the receiving side.
     /// <para>
@@ -210,41 +232,9 @@ namespace Mpc.Core
 
             foreach (ReceivedChunk<T> chunk in group.Chunks)
             {
-                string label = "chunk " + chunk.Chunk.Index.ToString(CultureInfo.InvariantCulture);
+                problems.AddRange(CheckChunk(chunk, ChunkLabel(chunk)));
                 string fromAddress = EmailAddress.GetAddress(chunk.From);
-                string fromDomain = EmailAddress.GetDomain(chunk.From);
-                if (fromAddress == null || fromDomain == null)
-                {
-                    problems.Add(label + ": no From: address");
-                    continue;
-                }
-                fromAddresses.Add(fromAddress);
-
-                string relay = NormalizeHost(chunk.Via);
-                List<AuthResult> results = chunk.AuthenticationResults
-                    .Where(ar => string.Equals(NormalizeHost(ar.AuthservId), relay, StringComparison.OrdinalIgnoreCase))
-                    .SelectMany(ar => ar.Results)
-                    .ToList();
-                if (results.Count == 0)
-                {
-                    problems.Add(label + ": no sender-check results from " + chunk.Via);
-                    continue;
-                }
-
-                // Every SPF, DKIM and DMARC result from the relay must be a pass, and each of the three
-                // must be there. The relay records all three for every chunk, so a pass written by
-                // the sender next to the relay's real "fail" can't outvote it.
-                // SPF: the chunk came straight from a server the sender's domain allows. (A genuine
-                // signed chunk resent from another server still passes DKIM; this catches it.)
-                Check(problems, label, chunk.Via, results, "spf", "SPF", r => true,
-                    "SPF {0} (at {1})");
-                // DKIM: a valid signature from the From: domain itself, so the chunk came from that
-                // domain's mail server unchanged.
-                Check(problems, label, chunk.Via, results, "dkim", "DKIM", r => SameDomain(r.GetProperty("header.d"), fromDomain, false),
-                    "no valid DKIM signature from " + fromDomain + " (at {1})");
-                // DMARC: SPF or DKIM passed for, and lines up with, the From: domain.
-                Check(problems, label, chunk.Via, results, "dmarc", "DMARC", r => SameDomain(r.GetProperty("header.from"), fromDomain, true),
-                    "DMARC {0} for " + fromDomain + " (at {1})");
+                if (fromAddress != null) fromAddresses.Add(fromAddress);
             }
 
             if (fromAddresses.Count > 1)
@@ -253,6 +243,113 @@ namespace Mpc.Core
             }
 
             return new SenderCheckResult(problems);
+        }
+
+        /// <summary>
+        /// Checks every copy of each chunk, not only the one <see cref="MpcCoalescer.Group"/> picked.
+        /// <para>
+        /// Two emails can carry the same X-MPC-ID and chunk number: a genuine chunk resent from
+        /// another server (a replay), or a forged one. Where one copy of a chunk passes the sender
+        /// checks and another doesn't, the passing copy is used, so a forged copy can't stop the
+        /// message being rejoined. Copies that fail, or whose From: address differs from the chunks
+        /// used, are returned as <see cref="SenderCheckSelection{T}.Suspicious"/>: the caller keeps
+        /// them and reports them instead of deleting them with the rest. Other duplicates stay
+        /// extras, as before.
+        /// </para>
+        /// </summary>
+        public static SenderCheckSelection<T> SelectPassing<T>(ChunkGroup<T> group)
+        {
+            if (group == null) throw new ArgumentNullException("group");
+
+            var used = new List<ReceivedChunk<T>>();
+            foreach (ReceivedChunk<T> picked in group.Chunks)
+            {
+                // The picked copy first, so nothing changes when every copy passes.
+                ReceivedChunk<T> passing = new[] { picked }
+                    .Concat(group.Extras.Where(e => e.Chunk.Index == picked.Chunk.Index && e.Chunk.Total == picked.Chunk.Total))
+                    .FirstOrDefault(c => CheckChunk(c, ChunkLabel(c)).Count == 0);
+                used.Add(passing ?? picked);
+            }
+
+            var fromAddresses = new HashSet<string>(
+                used.Select(c => EmailAddress.GetAddress(c.From)).Where(a => a != null),
+                StringComparer.OrdinalIgnoreCase);
+
+            var extras = new List<ReceivedChunk<T>>();
+            var suspicious = new List<ReceivedChunk<T>>();
+            var details = new List<string>();
+            foreach (ReceivedChunk<T> copy in group.Chunks.Concat(group.Extras))
+            {
+                if (used.Any(u => ReferenceEquals(u, copy))) continue;
+
+                string label = "duplicate of " + ChunkLabel(copy);
+                IReadOnlyList<string> problems = CheckChunk(copy, label);
+                string fromAddress = EmailAddress.GetAddress(copy.From);
+                if (problems.Count == 0 && fromAddress != null && fromAddresses.Count > 0 && !fromAddresses.Contains(fromAddress))
+                {
+                    problems = new[] { label + ": From: " + fromAddress + " differs from the other chunks" };
+                }
+
+                if (problems.Count == 0)
+                {
+                    extras.Add(copy);
+                }
+                else
+                {
+                    suspicious.Add(copy);
+                    details.Add(problems[0]);
+                }
+            }
+
+            return new SenderCheckSelection<T>(
+                new ChunkGroup<T>(group.MpcId, group.Total, used, extras), suspicious, details);
+        }
+
+        /// <summary>The sender-check problems of one chunk, each starting with <paramref name="label"/>.</summary>
+        public static IReadOnlyList<string> CheckChunk<T>(ReceivedChunk<T> chunk, string label)
+        {
+            if (chunk == null) throw new ArgumentNullException("chunk");
+
+            var problems = new List<string>();
+            string fromAddress = EmailAddress.GetAddress(chunk.From);
+            string fromDomain = EmailAddress.GetDomain(chunk.From);
+            if (fromAddress == null || fromDomain == null)
+            {
+                problems.Add(label + ": no From: address");
+                return problems;
+            }
+
+            string relay = NormalizeHost(chunk.Via);
+            List<AuthResult> results = chunk.AuthenticationResults
+                .Where(ar => string.Equals(NormalizeHost(ar.AuthservId), relay, StringComparison.OrdinalIgnoreCase))
+                .SelectMany(ar => ar.Results)
+                .ToList();
+            if (results.Count == 0)
+            {
+                problems.Add(label + ": no sender-check results from " + chunk.Via);
+                return problems;
+            }
+
+            // Every SPF, DKIM and DMARC result from the relay must be a pass, and each of the three
+            // must be there. The relay records all three for every chunk, so a pass written by
+            // the sender next to the relay's real "fail" can't outvote it.
+            // SPF: the chunk came straight from a server the sender's domain allows. (A genuine
+            // signed chunk resent from another server still passes DKIM; this catches it.)
+            Check(problems, label, chunk.Via, results, "spf", "SPF", r => true,
+                "SPF {0} (at {1})");
+            // DKIM: a valid signature from the From: domain itself, so the chunk came from that
+            // domain's mail server unchanged.
+            Check(problems, label, chunk.Via, results, "dkim", "DKIM", r => SameDomain(r.GetProperty("header.d"), fromDomain, false),
+                "no valid DKIM signature from " + fromDomain + " (at {1})");
+            // DMARC: SPF or DKIM passed for, and lines up with, the From: domain.
+            Check(problems, label, chunk.Via, results, "dmarc", "DMARC", r => SameDomain(r.GetProperty("header.from"), fromDomain, true),
+                "DMARC {0} for " + fromDomain + " (at {1})");
+            return problems;
+        }
+
+        private static string ChunkLabel<T>(ReceivedChunk<T> chunk)
+        {
+            return "chunk " + chunk.Chunk.Index.ToString(CultureInfo.InvariantCulture);
         }
 
         /// <summary>
