@@ -194,7 +194,14 @@ the results from that relay must say `spf=pass`, `dkim=pass` for the From: domai
 chunks must have the same From: address. Results from any other server are ignored, and a chunk
 without results from its relay fails. A message that fails is not rejoined: its chunks stay where
 they are, and **Rejoin MPC Chunks** lists it under "failed the sender checks" with the reason
-(the full list is in the log). Turn this off with `RequireSenderChecks=false`, for mail servers
+(the full list is in the log).
+
+Every copy of a chunk is checked, since two emails can carry the same X-MPC-ID and chunk number (a
+genuine chunk resent from another server, or a forged one). If one copy passes, it is used, so a
+forged copy can't stop the message. A duplicate that fails, or comes from a different From:
+address, is **not** deleted with the rest: it stays in the folder with the category
+"MPC: failed sender checks", and the report lists it with the reason. Identical duplicates that
+pass are removed with the other chunks, as before. Turn this off with `RequireSenderChecks=false`, for mail servers
 that don't add these results.
 
 ### Settings
@@ -312,7 +319,7 @@ These are deliberate. Most avoid failure cases in the current C code:
 
 ## Testing status
 
-- `tests/Mpc.Core.Tests`: 59 tests covering header formats, chunk sizes against the C formula,
+- `tests/Mpc.Core.Tests`: 64 tests covering header formats, chunk sizes against the C formula,
   UTF-8 boundaries, header parsing and rewriting, grouping (out of order, incomplete, duplicates),
   SRV lookups against an in-process DNS server over UDP and TCP (including NXDOMAIN, SERVFAIL and
   timeouts), and secret sharing: field arithmetic, packing, sharing and reconstruction for 1 to 5
@@ -322,7 +329,8 @@ These are deliberate. Most avoid failure cases in the current C code:
   OpenDKIM and OpenDMARC add in the lab's configuration), and passing or failing a message
   (forged chunk, a forged pass next to the relay's real fail, a replayed chunk, results from the
   wrong relay, SPF without DKIM, a DKIM signature or DMARC result for another domain, different
-  senders, missing results).
+  senders, missing results), and duplicates of a chunk (a replayed copy is kept and reported, a
+  passing copy is used even when a forged one comes first, identical copies are extras).
 - The add-in code compiles against the .NET Framework 4.8 reference assemblies at C# 7.3.
 
 It **has not yet been run inside Outlook**. On first use, check these:
