@@ -39,7 +39,14 @@ namespace Mpc.Core.Tests
 
         private static string Headers(int index, string via, string from, IEnumerable<string> authenticationResults)
         {
+            // Like delivered mail: the envelope sender is the From: address (alice when there is none).
+            return Headers(index, via, from, authenticationResults, "<" + (EmailAddress.GetAddress(from) ?? "alice@green.mpc") + ">");
+        }
+
+        private static string Headers(int index, string via, string from, IEnumerable<string> authenticationResults, string returnPath)
+        {
             var sb = new StringBuilder();
+            if (returnPath != null) sb.Append("Return-Path: ").Append(returnPath).Append("\r\n");
             sb.Append("Received: from relay.provider-c.test by mail.blue.mpc\r\n");
             foreach (string ar in authenticationResults) sb.Append("Authentication-Results: ").Append(ar).Append("\r\n");
             sb.Append("From: ").Append(from).Append("\r\n");
@@ -313,6 +320,53 @@ namespace Mpc.Core.Tests
             Assert.Equal("forged1", selection.Group.Chunks[0].Item);
             Assert.False(SenderChecks.Evaluate(selection.Group).Passed, "the message fails");
             Assert.Sequence(new[] { "replay1" }, selection.Suspicious.Select(c => c.Item), "the other copy");
+        }
+
+        private static SenderCheckResult CheckWithReturnPath(string from, string returnPath)
+        {
+            var chunks = new[]
+            {
+                MpcCoalescer.TryReadChunk("m1", Headers(1, RelayA, from, Passed(RelayA), returnPath)),
+                MpcCoalescer.TryReadChunk("m2", Headers(2, RelayB, from, Passed(RelayB), returnPath)),
+            };
+            return SenderChecks.Evaluate(MpcCoalescer.Group(chunks).Single());
+        }
+
+        [Test]
+        public static void ReadsTheReturnPath()
+        {
+            ReceivedChunk<string> chunk = MpcCoalescer.TryReadChunk("m", Headers(1, RelayA, Alice, Passed(RelayA), "<alice@green.mpc>"));
+            Assert.Equal("<alice@green.mpc>", chunk.ReturnPath);
+        }
+
+        [Test]
+        public static void FromMustBeTheEnvelopeSender()
+        {
+            // Gap E: alice logs in as herself (so the envelope sender is hers and SPF passes) but
+            // writes another green.mpc address in From:; her server still signs it, so SPF, DKIM
+            // and DMARC all pass at the relay.
+            SenderCheckResult result = CheckWithReturnPath("CEO <ceo@green.mpc>", "<alice@green.mpc>");
+            Assert.False(result.Passed, "a From: that isn't the envelope sender");
+            Assert.Sequence(new[]
+            {
+                "chunk 1: From: ceo@green.mpc is not the envelope sender alice@green.mpc",
+                "chunk 2: From: ceo@green.mpc is not the envelope sender alice@green.mpc",
+            }, result.Problems, "problems");
+
+            Assert.True(CheckWithReturnPath(Alice, "<ALICE@green.mpc>").Passed, "letter case doesn't matter");
+        }
+
+        [Test]
+        public static void FailsWithoutAReturnPath()
+        {
+            SenderCheckResult result = CheckWithReturnPath(Alice, null);
+            Assert.Sequence(new[]
+            {
+                "chunk 1: no envelope sender (Return-Path)",
+                "chunk 2: no envelope sender (Return-Path)",
+            }, result.Problems, "problems");
+
+            Assert.False(CheckWithReturnPath(Alice, "<>").Passed, "an empty envelope sender (a bounce)");
         }
 
         [Test]

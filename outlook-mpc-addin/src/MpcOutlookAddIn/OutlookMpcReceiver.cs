@@ -19,6 +19,7 @@ namespace MpcOutlookAddIn
         public int Failed;
         public int FailedSenderChecks;
         public int SuspiciousDuplicates;
+        public int SkippedFlagged;
         public readonly List<string> WaitingDetails = new List<string>();
         public readonly List<string> SenderCheckDetails = new List<string>();
         public readonly List<string> SuspiciousDetails = new List<string>();
@@ -36,12 +37,13 @@ namespace MpcOutlookAddIn
             }
             if (FailedSenderChecks > 0)
             {
-                lines.Add(FailedSenderChecks + " message(s) failed the sender checks and were not rejoined:");
+                lines.Add(FailedSenderChecks + " message(s) failed the sender checks and were not rejoined. Their chunks were moved to Junk Email, in the category \"" +
+                          OutlookMpcReceiver.SuspiciousCategory + "\", and won't be listed again (remove the category to check them again):");
                 lines.AddRange(SenderCheckDetails.Take(10).Select(d => "  • " + d));
             }
             if (SuspiciousDuplicates > 0)
             {
-                lines.Add(SuspiciousDuplicates + " duplicate chunk(s) failed the sender checks; they were left in the folder, in the category \"" +
+                lines.Add(SuspiciousDuplicates + " duplicate chunk(s) failed the sender checks; they were moved to Junk Email, in the category \"" +
                           OutlookMpcReceiver.SuspiciousCategory + "\":");
                 lines.AddRange(SuspiciousDetails.Take(10).Select(d => "  • " + d));
             }
@@ -120,6 +122,7 @@ namespace MpcOutlookAddIn
                     try
                     {
                         var mail = entry as Outlook.MailItem;
+                        if (mail != null && HasCategory(mail.Categories, SuspiciousCategory)) report.SkippedFlagged++;
                         ReceivedChunk<ChunkRef> chunk = mail == null ? null : ReadChunk(mail);
                         if (chunk != null) chunks.Add(chunk);
                     }
@@ -166,6 +169,7 @@ namespace MpcOutlookAddIn
                         report.FailedSenderChecks++;
                         report.SenderCheckDetails.Add("\"" + group.Chunks[0].Item.Subject + "\": " + check.Problems[0]);
                         AddInLog.Write("Not rejoining X-MPC-ID " + group.MpcId + ": sender checks failed: " + string.Join("; ", check.Problems));
+                        FlagFailed(found, storeId);
                         continue;
                     }
                 }
@@ -186,6 +190,7 @@ namespace MpcOutlookAddIn
             AddInLog.Write("Rejoin pass on \"" + folder.Name + "\": scanned " + report.Scanned + ", chunks " + report.ChunksFound +
                            ", rejoined " + report.Rejoined + ", waiting " + report.Waiting + ", failed sender checks " + report.FailedSenderChecks +
                            ", suspicious duplicates " + report.SuspiciousDuplicates +
+                           ", skipped (already failed) " + report.SkippedFlagged +
                            ", failed " + report.Failed + ".");
             return report;
         }
@@ -193,6 +198,8 @@ namespace MpcOutlookAddIn
         private static ReceivedChunk<ChunkRef> ReadChunk(Outlook.MailItem mail)
         {
             if (OutlookMpc.IsRejoined(mail)) return null;
+            // Already failed the sender checks: dealt with, until the user removes the category.
+            if (HasCategory(mail.Categories, SuspiciousCategory)) return null;
 
             string headers = OutlookMpc.GetTransportHeaders(mail);
             if (string.IsNullOrEmpty(headers) ||
@@ -317,9 +324,10 @@ namespace MpcOutlookAddIn
         }
 
         /// <summary>
-        /// After a message was rejoined, its duplicate chunks that failed the sender checks stay in
-        /// the folder for the user to see: they get the <see cref="SuspiciousCategory"/> category and
-        /// the rejoined marker (so later passes don't keep listing them as waiting), and are reported.
+        /// After a message was rejoined, its duplicate chunks that failed the sender checks are kept
+        /// for the user to see: they get the <see cref="SuspiciousCategory"/> category and the
+        /// rejoined marker (so later passes don't keep listing them as waiting), are moved to the
+        /// account's Junk Email folder, and are reported.
         /// </summary>
         private void KeepSuspicious(SenderCheckSelection<ChunkRef> selection, string storeId, RejoinReport report)
         {
@@ -337,7 +345,7 @@ namespace MpcOutlookAddIn
                         OutlookMpc.MarkRejoined(m);
                         m.Categories = AddCategory(m.Categories, SuspiciousCategory);
                         m.Save();
-                        return true;
+                        return MoveToJunk(m);
                     });
                 }
                 catch (Exception ex)
@@ -345,6 +353,116 @@ namespace MpcOutlookAddIn
                     AddInLog.Write("Could not mark a suspicious duplicate", ex);
                 }
             }
+        }
+
+        /// <summary>
+        /// Gives every chunk of a message that failed the sender checks (and any copies of them) the
+        /// <see cref="SuspiciousCategory"/> category. Chunks with it are skipped from then on, so the
+        /// message is reported once; removing the category makes the add-in check it again. The
+        /// chunks are moved to the account's Junk Email folder (kept, not deleted) and aren't marked
+        /// rejoined.
+        /// </summary>
+        private void FlagFailed(ChunkGroup<ChunkRef> group, string storeId)
+        {
+            foreach (ReceivedChunk<ChunkRef> part in group.Chunks.Concat(group.Extras))
+            {
+                try
+                {
+                    WithChunk(part.Item.EntryId, storeId, "mark a chunk that failed the sender checks", m =>
+                    {
+                        m.Categories = AddCategory(m.Categories, SuspiciousCategory);
+                        m.Save();
+                        return MoveToJunk(m);
+                    });
+                }
+                catch (Exception ex)
+                {
+                    AddInLog.Write("Could not mark a chunk that failed the sender checks", ex);
+                }
+            }
+        }
+
+        /// <summary>Folder names tried when an account has no default Junk Email folder.</summary>
+        private static readonly string[] JunkFolderNames = { "Junk Email", "Junk E-mail", "Junk", "Spam", "Junk Mail" };
+
+        /// <summary>
+        /// Moves a chunk to its account's Junk Email folder, like a mail server's quarantine: out of
+        /// the Inbox, but kept for inspection. If the account has none, the chunk stays where it is
+        /// (it still has the category). <paramref name="mail"/> can't be used afterwards.
+        /// </summary>
+        private static bool MoveToJunk(Outlook.MailItem mail)
+        {
+            Outlook.MAPIFolder current = null;
+            Outlook.Store store = null;
+            Outlook.MAPIFolder junk = null;
+            object moved = null;
+            try
+            {
+                current = mail.Parent as Outlook.MAPIFolder;
+                if (current == null) return false;
+                store = current.Store;
+                junk = FindJunkFolder(store);
+                if (junk == null)
+                {
+                    AddInLog.Write("No Junk Email folder in " + store.DisplayName + "; the chunk stays in " + current.Name + ".");
+                    return false;
+                }
+                if (string.Equals(junk.EntryID, current.EntryID, StringComparison.Ordinal)) return true;
+
+                moved = mail.Move(junk);
+                return true;
+            }
+            finally
+            {
+                OutlookMpc.Release(moved);
+                OutlookMpc.Release(junk);
+                OutlookMpc.Release(store);
+                OutlookMpc.Release(current);
+            }
+        }
+
+        private static Outlook.MAPIFolder FindJunkFolder(Outlook.Store store)
+        {
+            try
+            {
+                return store.GetDefaultFolder(Outlook.OlDefaultFolders.olFolderJunk);
+            }
+            catch (COMException)
+            {
+                // Some accounts (IMAP, say) have no default Junk folder; look for one by name.
+            }
+
+            Outlook.MAPIFolder root = null;
+            Outlook.Folders folders = null;
+            try
+            {
+                root = store.GetRootFolder();
+                folders = root.Folders;
+                for (int i = 1; i <= folders.Count; i++)
+                {
+                    Outlook.MAPIFolder folder = folders[i];
+                    if (JunkFolderNames.Contains(folder.Name, StringComparer.OrdinalIgnoreCase)) return folder;
+                    OutlookMpc.Release(folder);
+                }
+            }
+            catch (COMException ex)
+            {
+                AddInLog.Write("Could not look for a Junk folder in " + store.DisplayName, ex);
+            }
+            finally
+            {
+                OutlookMpc.Release(folders);
+                OutlookMpc.Release(root);
+            }
+            return null;
+        }
+
+        /// <summary>True if Outlook's comma-separated category list contains <paramref name="category"/>.</summary>
+        internal static bool HasCategory(string categories, string category)
+        {
+            return (categories ?? string.Empty)
+                .Split(new[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries)
+                .Any(c => string.Equals(c.Trim(), category, StringComparison.OrdinalIgnoreCase));
         }
 
         /// <summary>Adds <paramref name="category"/> to Outlook's comma-separated category list.</summary>

@@ -178,11 +178,11 @@ every chunk passed (its `RequireSenderChecks` setting).
 | Server | Adds | Checks | Action |
 |---|---|---|---|
 | DNS (each mail domain) | SPF `v=spf1 ip4:<its mail server> -all`, DKIM key at `mpc._domainkey.<domain>`, DMARC `v=DMARC1; p=reject; adkim=s; aspf=r` | — | — |
-| Sending mail server (port 587) | a DKIM signature (OpenDKIM), also over `X-MPC-Via/-ID/-Chunk/-Scheme` | the logged-in user owns the MAIL FROM address | refuses a MAIL FROM the user doesn't own |
+| Sending mail server (port 587) | a DKIM signature (OpenDKIM), also over `X-MPC-Via/-ID/-Chunk/-Scheme` | the logged-in user owns the MAIL FROM address, and the From: header is that address (`mpc-fromcheck`) | refuses a MAIL FROM the user doesn't own (553), and a From: that isn't the MAIL FROM (553), before signing |
 | Recipient's entry relays (port 25) | `Authentication-Results: relay.provider-x.test; spf=… dkim=… dmarc=…` | blocklist (`blocked_cidrs`), DKIM (OpenDKIM), SPF and DMARC (OpenDMARC) | refuses blocklisted clients. First **removes every `Authentication-Results` line in the chunk**, so the sender can't write its own results; then checks, **tags** and passes the chunk on. Holds mail if a checker is down |
-| Partner relays (second hop, port 2525) | — | nothing: only the relays may use this port | passes the chunk on with the entry relay's results |
-| Recipient's mail server (port 25) | — | — | keeps only the `Authentication-Results` of its own domain's relays |
-| Outlook add-in | — | for each chunk, the results from the relay in its `X-MPC-Via`: `spf=pass`, `dkim=pass` from the From: domain and `dmarc=pass`, and no other SPF, DKIM or DMARC result; all chunks have the same From: | rejoins only if all pass; otherwise lists the message under "failed the sender checks" |
+| Partner relays (second hop, port 2525) | — | nothing: only the relays may use this port | passes the chunk on with the entry relay's results, to the recipient's mail server on port 2525 |
+| Recipient's mail server | — | — | on **port 2525** (relays only): keeps only the `Authentication-Results` of its own domain's entry relays. On **port 25** (any other server): removes them all, so a server that sends chunks straight here, past the relays, can't bring "pass" results; then checks DKIM, SPF and DMARC itself and adds `Authentication-Results: mail.<domain>; …` (it tags, for ordinary mail; the add-in doesn't use these) |
+| Outlook add-in | — | for each chunk, the results from the relay in its `X-MPC-Via`: `spf=pass`, `dkim=pass` from the From: domain and `dmarc=pass`, and no other SPF, DKIM or DMARC result; the From: address is the envelope sender (`Return-Path`); all chunks have the same From: | rejoins only if all pass; otherwise lists the message under "failed the sender checks" |
 
 The relays tag rather than reject: if relay-a rejected chunk 1 and relay-b accepted chunk 2, bob
 would be left with half a message. The add-in makes one decision for the whole message.
@@ -218,8 +218,9 @@ checks".)
 `tofu apply` (this replaces the relays). Mail from mail.blue.mpc is then refused at the relays
 with `554 5.7.1 … Listed on the MPC lab blocklist`, and bob gets a bounce for alice-bound mail.
 
-**On a server**, the checks log to `/var/log/mail.log` (`grep -E 'opendkim|opendmarc'`);
-`systemctl status opendkim opendmarc` shows the checkers.
+**On a server**, the checks log to `/var/log/mail.log` (`grep -E 'opendkim|opendmarc|mpc-fromcheck'`);
+`systemctl status opendkim opendmarc` shows the checkers, and on a mail server
+`systemctl status mpc-fromcheck` the From: check.
 
 ## Troubleshooting
 
@@ -229,7 +230,8 @@ with `554 5.7.1 … Listed on the MPC lab blocklist`, and bob gets a bounce for 
 | Message goes out unsplit | `DnsServers=` line in `settings.ini` and Outlook restarted; the SRV check above; `%LOCALAPPDATA%\MpcOutlookAddIn\mpc.log` |
 | Outlook can't connect | Your public IP address still matches `admin_cidr`; setup finished (`/var/lib/mpc-lab/ready`) |
 | Mail stuck on a server | `postqueue -p` and `/var/log/mail.log` on that server |
-| Mail held on a relay or a mail server with `451 4.7.1 Service unavailable - try again later` | A sender-check service is down: `systemctl status opendkim opendmarc` on that server |
+| Mail held on a relay or a mail server with `451 4.7.1 Service unavailable - try again later` | A sender-check service is down: `systemctl status opendkim opendmarc` on that server (and `mpc-fromcheck` on a mail server) |
+| Outlook can't send: `553 5.7.1 The From: header must be your own address` | The account's From: address isn't its login@domain. Check the account's email address in Outlook |
 | The add-in says a message "failed the sender checks" | The reason is in its report and in `mpc.log`. A lab built before the sender checks doesn't add `Authentication-Results`: run `tofu apply`, or set `RequireSenderChecks=false` in the add-in's settings |
 | `dkim=temperror` or `dkim=permerror (no key)` | The DKIM record: `tofu output -raw check_sender_records`, and `systemctl status systemd-resolved` on the relay |
 

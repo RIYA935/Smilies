@@ -217,8 +217,9 @@ namespace Mpc.Core
     /// header named after itself, and the recipient's mail server removes any it didn't get from
     /// those relays. A message is rejoined only when, for every chunk, the results from its
     /// relay say SPF passed, a DKIM signature from the From: domain verified and DMARC passed,
-    /// with no other result for those three; and all chunks have the same From: address. A chunk
-    /// without results from its relay fails: unchecked is not trusted.
+    /// with no other result for those three; its From: address is its envelope sender
+    /// (Return-Path); and all chunks have the same From: address. A chunk without results from its
+    /// relay fails: unchecked is not trusted.
     /// </para>
     /// </summary>
     public static class SenderChecks
@@ -317,6 +318,20 @@ namespace Mpc.Core
             {
                 problems.Add(label + ": no From: address");
                 return problems;
+            }
+
+            // The From: address must be the envelope sender. The sender's mail server only lets a
+            // user send with their own address as the envelope sender (reject_sender_login_mismatch)
+            // and the entry relay checks its domain with SPF, but DKIM signs whatever From: the user
+            // wrote: without this, alice could send a chunk "from" ceo@green.mpc that passes.
+            string envelopeSender = EmailAddress.GetAddress(chunk.ReturnPath);
+            if (envelopeSender == null)
+            {
+                problems.Add(label + ": no envelope sender (Return-Path)");
+            }
+            else if (!string.Equals(envelopeSender, fromAddress, StringComparison.OrdinalIgnoreCase))
+            {
+                problems.Add(label + ": From: " + fromAddress + " is not the envelope sender " + envelopeSender);
             }
 
             string relay = NormalizeHost(chunk.Via);

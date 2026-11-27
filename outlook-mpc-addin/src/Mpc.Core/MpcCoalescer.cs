@@ -8,7 +8,7 @@ namespace Mpc.Core
     public sealed class ReceivedChunk<T>
     {
         public ReceivedChunk(T item, string mpcId, ChunkValue chunk, string via, string scheme = null,
-            string from = null, IReadOnlyList<AuthenticationResults> authenticationResults = null)
+            string from = null, IReadOnlyList<AuthenticationResults> authenticationResults = null, string returnPath = null)
         {
             Item = item;
             MpcId = mpcId;
@@ -17,6 +17,7 @@ namespace Mpc.Core
             Scheme = string.IsNullOrWhiteSpace(scheme) ? null : scheme.Trim();
             From = from;
             AuthenticationResults = authenticationResults ?? new AuthenticationResults[0];
+            ReturnPath = returnPath;
         }
 
         public T Item { get; private set; }
@@ -32,6 +33,12 @@ namespace Mpc.Core
 
         /// <summary>Every Authentication-Results header on the chunk, for the sender checks.</summary>
         public IReadOnlyList<AuthenticationResults> AuthenticationResults { get; private set; }
+
+        /// <summary>
+        /// The Return-Path header: the envelope sender (MAIL FROM), added by the mail server that
+        /// delivered the chunk (Postfix drops any Return-Path a sender wrote). Null if there was none.
+        /// </summary>
+        public string ReturnPath { get; private set; }
     }
 
     /// <summary>All the chunks that share one X-MPC-ID.</summary>
@@ -133,7 +140,8 @@ namespace Mpc.Core
             string scheme = InternetHeaders.GetFirst(rawHeaders, MpcConstants.HeaderScheme);
             return new ReceivedChunk<T>(item, id.Trim(), chunk, via, scheme,
                 InternetHeaders.GetFirst(rawHeaders, "From"),
-                Mpc.Core.AuthenticationResults.FromHeaders(rawHeaders));
+                Mpc.Core.AuthenticationResults.FromHeaders(rawHeaders),
+                InternetHeaders.GetFirst(rawHeaders, "Return-Path"));
         }
 
         /// <summary>

@@ -98,12 +98,17 @@ locals {
     { for l in local.relay_links : l[1] => l[0] },
   )
 
-  # Postfix transport table for each relay: "<domain> smtp:[partner]" for the domains it is an
-  # entry relay of. Mail for any other domain is delivered normally (MX lookup).
+  # Postfix transport table for each relay: "<domain> smtp:[partner]:2525" for the domains it is
+  # an entry relay of, and "<domain> smtp:[mail server]:2525" for the other lab domains. Port 2525
+  # (relays only) is how the relays reach each other and the mail servers, keeping the entry
+  # relay's Authentication-Results; port 25 removes them. Other domains: MX lookup as usual.
   relay_transport = {
     for k, h in local.hosts : k => join("\n", [
-      for d in sort(keys(local.mpc_srv)) : "${d} smtp:[${local.hosts[local.relay_partner[k]].fqdn}]:2525"
-      if contains(local.mpc_srv[d], k) && contains(keys(local.relay_partner), k)
+      for d in sort(keys(local.mail_domains)) : (
+        contains(lookup(local.mpc_srv, d, []), k) && contains(keys(local.relay_partner), k)
+        ? "${d} smtp:[${local.hosts[local.relay_partner[k]].fqdn}]:2525"
+        : "${d} smtp:[${local.mail_domains[d]}]:2525"
+      )
     ]) if h.role == "relay"
   }
 
